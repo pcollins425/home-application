@@ -583,13 +583,17 @@ async function sessionEmail(
 async function requireGoogleUser(
   request: Request,
   env: Env,
-  basePath: string
+  basePath: string,
+  mode: "html" | "api"
 ): Promise<{ email: string } | Response> {
   const email = await sessionEmail(request, env);
   if (email && email === allowedEmail(env)) return { email };
   const login = `${basePath}/auth/login`;
-  if (request.headers.get("Accept")?.includes("text/html")) {
-    return Response.redirect(new URL(login, request.url).toString(), 302);
+  if (mode === "html") {
+    return new Response(null, {
+      status: 302,
+      headers: { Location: new URL(login, request.url).toString() },
+    });
   }
   return json({ error: "unauthorized", login }, 401);
 }
@@ -618,22 +622,23 @@ async function handleAuth(
       prompt: "select_account",
       state,
     });
-    const res = Response.redirect(
-      `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
-      302
-    );
-    // store state in cookie briefly
-    res.headers.append(
-      "Set-Cookie",
-      `home_oauth_state=${state}; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
-    );
-    return res;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
+        "Set-Cookie": `home_oauth_state=${state}; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      },
+    });
   }
 
   if (path === "/auth/logout") {
-    const res = Response.redirect(`${url.origin}${basePath || "/"}`, 302);
-    res.headers.append("Set-Cookie", clearSessionCookie(basePath));
-    return res;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: `${url.origin}${basePath || "/"}`,
+        "Set-Cookie": clearSessionCookie(basePath),
+      },
+    });
   }
 
   if (path === "/auth/callback") {
@@ -688,19 +693,24 @@ async function handleAuth(
       );
     }
 
-    const res = Response.redirect(`${url.origin}${basePath || "/"}`, 302);
-    res.headers.append(
-      "Set-Cookie",
-      await makeSessionCookie(env, email, basePath)
-    );
-    res.headers.append(
+    const headers = new Headers({
+      Location: `${url.origin}${basePath || "/"}`,
+    });
+    headers.append("Set-Cookie", await makeSessionCookie(env, email, basePath));
+    headers.append(
       "Set-Cookie",
       `home_oauth_state=; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
     );
-    return res;
+    return new Response(null, { status: 302, headers });
   }
 
   return json({ error: "not_found" }, 404);
+}
+
+function isAuthed(
+  result: { email: string } | Response
+): result is { email: string } {
+  return "email" in result;
 }
 
 export default {
@@ -717,12 +727,14 @@ export default {
       return handleAuth(request, env, path, basePath);
     }
 
-    const gate = await requireGoogleUser(request, env, basePath);
-    if (gate instanceof Response) return gate;
-
     if (path.startsWith("/api/")) {
+      const gate = await requireGoogleUser(request, env, basePath, "api");
+      if (!isAuthed(gate)) return gate;
       return handleApi(request, env, path);
     }
+
+    const gate = await requireGoogleUser(request, env, basePath, "html");
+    if (!isAuthed(gate)) return gate;
 
     const assetUrl = new URL(request.url);
     assetUrl.pathname = path;
