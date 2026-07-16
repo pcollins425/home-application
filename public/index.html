@@ -4,7 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Home — Transactions</title>
-  <link rel="stylesheet" href="styles.css?v=7" />
+  <script>
+    // Absolute asset URLs under /plaid/* (www) or / (workers.dev)
+    window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=8" />');
+  </script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 </head>
 <body>
@@ -18,7 +22,7 @@
       <div class="actions">
         <button type="button" id="linkBtn" class="btn primary">Log in to bank</button>
         <button type="button" id="syncBtn" class="btn">Sync now</button>
-        <a id="logoutLink" class="btn" href="auth/logout">Sign out</a>
+        <a id="logoutLink" class="btn" href="#">Sign out</a>
       </div>
     </header>
 
@@ -42,6 +46,9 @@
       </div>
     </section>
   </main>
-  <script src="app.js?v=7"></script>
+  <script>
+    document.getElementById("logoutLink").href = (window.__BASE || "") + "/auth/logout";
+    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=8"><\/script>');
+  </script>
 </body>
 </html>

@@ -5,14 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sign in — Home</title>
   <script>
-    // Absolute CSS under /plaid/... (relative styles.css breaks at /plaid/auth/login)
-    (function () {
-      const base = location.pathname.startsWith("/plaid") ? "/plaid/" : "/";
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = base + "styles.css?v=7";
-      document.head.appendChild(link);
-    })();
+    window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=8" />');
   </script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
@@ -33,7 +27,7 @@
     </section>
   </main>
   <script>
-    const API_BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
+    const API_BASE = window.__BASE || (location.pathname.startsWith("/plaid") ? "/plaid" : "");
     const errEl = document.getElementById("err");
     const msgEl = document.getElementById("msg");
 

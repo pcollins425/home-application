@@ -24,6 +24,9 @@ migrations_dir = "migrations"
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+# Required for www.../plaid* — otherwise HTML SPA-fallback bypasses the Worker
+# (no auth, relative CSS/JS resolve wrong → stuck on "Starting…").
+run_worker_first = true
 
 # Poll Plaid while the home PC is off (no tunnel/webhooks for this bridge).
 [triggers]

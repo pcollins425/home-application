@@ -1,5 +1,10 @@
 /** works on workers.dev (/) and www.../plaid/ */
-const API_BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
+const API_BASE =
+  typeof window !== "undefined" && window.__BASE != null
+    ? window.__BASE
+    : location.pathname.startsWith("/plaid")
+      ? "/plaid"
+      : "";
 
 const statusLine = document.getElementById("statusLine");
 const meta = document.getElementById("meta");
