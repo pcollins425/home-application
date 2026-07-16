@@ -112,12 +112,14 @@ async function createLinkToken(env: Env, request: Request): Promise<Response> {
 async function exchangePublicToken(
   env: Env,
   request: Request
-): Promise<Response> {
+): Promise<{ response: Response; background?: () => Promise<unknown> }> {
   const { public_token, metadata } = (await request.json()) as {
     public_token?: string;
     metadata?: { institution?: { name?: string } };
   };
-  if (!public_token) return json({ error: "public_token required" }, 400);
+  if (!public_token) {
+    return { response: json({ error: "public_token required" }, 400) };
+  }
 
   const res = await plaidFetch(env, "/item/public_token/exchange", {
     public_token,
@@ -129,27 +131,34 @@ async function exchangePublicToken(
     error_message?: string;
   };
   if (!res.ok || !data.access_token || !data.item_id) {
-    return json({ error: "exchange_failed", detail: data }, 502);
+    return { response: json({ error: "exchange_failed", detail: data }, 502) };
   }
 
-  const institution =
-    metadata?.institution?.name || null;
+  const institution = metadata?.institution?.name || null;
   const now = new Date().toISOString();
+  const itemId = data.item_id;
+  const accessToken = data.access_token;
 
-  // Single-item bridge: replace any previous Item.
+  // Store Item immediately; sync in background so the browser isn't stuck behind
+  // a multi-page /transactions/sync (frontend used to abort at 20s).
   await env.DB.batch([
     env.DB.prepare("DELETE FROM transactions"),
     env.DB.prepare("DELETE FROM accounts"),
     env.DB.prepare("DELETE FROM plaid_items"),
     env.DB.prepare(
       `INSERT INTO plaid_items (item_id, access_token, institution_name, cursor, linked_at, last_sync_status)
-       VALUES (?, ?, ?, NULL, ?, 'linked')`
-    ).bind(data.item_id, data.access_token, institution, now),
+       VALUES (?, ?, ?, NULL, ?, 'syncing')`
+    ).bind(itemId, accessToken, institution, now),
   ]);
 
-  // Kick sync; may be empty until Plaid finishes preparing history.
-  const syncResult = await syncItem(env, data.item_id, data.access_token);
-  return json({ ok: true, item_id: data.item_id, sync: syncResult });
+  return {
+    response: json({
+      ok: true,
+      item_id: itemId,
+      sync: { started: true, status: "syncing" },
+    }),
+    background: () => syncItem(env, itemId, accessToken),
+  };
 }
 
 async function upsertAccounts(
@@ -192,16 +201,17 @@ async function upsertAccounts(
       a.type ?? null
     )
   );
-  if (stmts.length) await env.DB.batch(stmts);
+  if (stmts.length) await runBatch(env, stmts);
 }
 
-function locationLabel(tx: PlaidTx): string | null {
-  const city = tx.location?.city;
-  const region = tx.location?.region;
-  if (city && region) return `${city}, ${region}`;
-  if (city) return city;
-  if (region) return region;
-  return null;
+async function runBatch(
+  env: Env,
+  stmts: D1PreparedStatement[],
+  chunkSize = 50
+): Promise<void> {
+  for (let i = 0; i < stmts.length; i += chunkSize) {
+    await env.DB.batch(stmts.slice(i, i + chunkSize));
+  }
 }
 
 async function applyTransactionPage(
@@ -215,7 +225,6 @@ async function applyTransactionPage(
   let stored = 0;
 
   const upsert = (tx: PlaidTx) => {
-    const loc = locationLabel(tx);
     const category = tx.category?.join(", ") ?? null;
     stmts.push(
       env.DB.prepare(
@@ -250,7 +259,6 @@ async function applyTransactionPage(
       )
     );
     stored += 1;
-    void loc;
   };
 
   for (const tx of added) upsert(tx);
@@ -263,7 +271,7 @@ async function applyTransactionPage(
     );
   }
 
-  if (stmts.length) await env.DB.batch(stmts);
+  if (stmts.length) await runBatch(env, stmts);
   return { stored, removed: removed.length };
 }
 
@@ -438,7 +446,8 @@ async function listTransactions(
 async function handleApi(
   request: Request,
   env: Env,
-  path: string
+  path: string,
+  ctx: ExecutionContext
 ): Promise<Response> {
   if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET) {
     return json({ error: "plaid_secrets_missing" }, 500);
@@ -451,11 +460,23 @@ async function handleApi(
     return createLinkToken(env, request);
   }
   if (path === "/api/exchange_public_token" && request.method === "POST") {
-    return exchangePublicToken(env, request);
+    const out = await exchangePublicToken(env, request);
+    if (out.background) ctx.waitUntil(out.background());
+    return out.response;
   }
   if (path === "/api/sync" && request.method === "POST") {
-    const results = await syncAll(env);
-    return json({ ok: true, results });
+    // Kick sync in background; client polls /api/status until last_sync_status=ok|error
+    const item = await env.DB.prepare(
+      "SELECT item_id FROM plaid_items LIMIT 1"
+    ).first<{ item_id: string }>();
+    if (!item) return json({ error: "not_linked" }, 400);
+    await env.DB.prepare(
+      `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL WHERE item_id = ?`
+    )
+      .bind(item.item_id)
+      .run();
+    ctx.waitUntil(syncAll(env));
+    return json({ ok: true, sync: { started: true, status: "syncing" } });
   }
   if (path === "/api/transactions" && request.method === "GET") {
     return listTransactions(env, request);
@@ -589,7 +610,9 @@ async function requireGoogleUser(
 ): Promise<{ email: string } | Response> {
   const email = await sessionEmail(request, env);
   if (email && email === allowedEmail(env)) return { email };
-  const login = `${basePath}/auth/login`;
+  // Prefer /login (pretty Assets path) so relative CSS works; /auth/login also works
+  // but nested under /auth/ breaks relative styles.css → /plaid/auth/styles.css 404.
+  const login = `${basePath}/login`;
   if (mode === "html") {
     return new Response(null, {
       status: 302,
@@ -664,7 +687,7 @@ async function handleAuth(
   }
 
   if (path === "/auth/logout") {
-    const dest = `${url.origin}${basePath}/auth/login`;
+    const dest = `${url.origin}${basePath}/login`;
     return new Response(null, {
       status: 302,
       headers: {
@@ -723,7 +746,11 @@ function isStaticAsset(path: string): boolean {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
     const url = new URL(request.url);
     const { path, redirectedFromBareBase, basePath } = rewritePath(url.pathname);
 
@@ -749,7 +776,7 @@ export default {
     if (path.startsWith("/api/")) {
       const gate = await requireGoogleUser(request, env, basePath, "api");
       if (!isAuthed(gate)) return gate;
-      return handleApi(request, env, path);
+      return handleApi(request, env, path, ctx);
     }
 
     // Public static assets (no secrets). Gate HTML shell + API only.

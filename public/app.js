@@ -14,13 +14,13 @@ function setStatus(msg) {
   if (statusLine) statusLine.textContent = msg;
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, timeoutMs = 30000) {
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 20000);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(`${API_BASE}${path}`, {
@@ -39,8 +39,8 @@ async function api(path, options = {}) {
   clearTimeout(timer);
 
   if (res.status === 401) {
-    setStatus("Session expired — redirecting to Google sign-in…");
-    location.href = `${API_BASE}/auth/login`;
+    setStatus("Session expired — redirecting to sign-in…");
+    location.href = `${API_BASE}/login`;
     throw new Error("unauthorized");
   }
   const data = await res.json().catch(() => ({}));
@@ -87,9 +87,34 @@ async function prefetchLinkToken() {
   return linkTokenPromise;
 }
 
+/** Poll until sync leaves "syncing" (background Worker job). */
+async function waitForSync(maxMs = 120000) {
+  const start = Date.now();
+  let delay = 1500;
+  while (Date.now() - start < maxMs) {
+    const status = await api("/api/status");
+    const st = status.item?.last_sync_status;
+    if (st === "ok" || st === "error" || st === "linked") {
+      return status;
+    }
+    setStatus(
+      `Syncing${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""}… (${status.transaction_count || 0} so far)`
+    );
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay + 500, 4000);
+  }
+  return api("/api/status");
+}
+
 async function refresh() {
   setStatus("Fetching transactions…");
-  const status = await api("/api/status");
+  let status = await api("/api/status");
+
+  if (status.item?.last_sync_status === "syncing") {
+    setStatus("Sync still running — waiting…");
+    status = await waitForSync();
+  }
+
   const syncClass =
     status.item?.last_sync_status === "ok"
       ? "ok"
@@ -113,7 +138,7 @@ async function refresh() {
       <span>Last sync: <strong>${status.item?.last_sync_at || "—"}</strong>
         <span class="pill ${syncClass}">${status.item?.last_sync_status || "unknown"}</span>
       </span>
-      ${status.item?.last_sync_error ? `<span>Error: <strong>${status.item.last_sync_error}</strong></span>` : ""}
+      ${status.item?.last_sync_error ? `<span>Error: <strong>${escapeHtml(status.item.last_sync_error)}</strong></span>` : ""}
     `
       : `<span>Connect one account. Done.</span>`;
   }
@@ -183,11 +208,13 @@ if (linkBtn) {
       const handler = Plaid.create({
         token,
         onSuccess: async (public_token, metadata) => {
-          setStatus("Connecting and syncing…");
+          setStatus("Connecting…");
           await api("/api/exchange_public_token", {
             method: "POST",
             body: JSON.stringify({ public_token, metadata }),
           });
+          setStatus("Connected — syncing in background…");
+          await waitForSync();
           await refresh();
         },
         onExit: () => {
@@ -205,9 +232,10 @@ if (linkBtn) {
 if (syncBtn) {
   syncBtn.addEventListener("click", async () => {
     syncBtn.disabled = true;
-    setStatus("Syncing…");
+    setStatus("Starting sync…");
     try {
       await api("/api/sync", { method: "POST" });
+      await waitForSync();
       await refresh();
     } catch (err) {
       setStatus(String(err.message || err));
