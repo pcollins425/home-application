@@ -7,11 +7,7 @@ workers_dev = true
 # Optional custom host (DNS must exist / be proxied on collinsmediallc.com):
 # In dashboard: Workers → home-application → Domains, or add DNS + keep this route.
 [[routes]]
-pattern = "www.collinsmediallc.com/plaid"
-zone_name = "collinsmediallc.com"
-
-[[routes]]
-pattern = "www.collinsmediallc.com/plaid/*"
+pattern = "www.collinsmediallc.com/plaid*"
 zone_name = "collinsmediallc.com"
 
 [[routes]]
