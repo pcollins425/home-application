@@ -90,14 +90,27 @@ async function createLinkToken(env: Env, request: Request): Promise<Response> {
     language: "en",
   };
 
-  const redirect =
-    env.PLAID_REDIRECT_URI ||
-    `${new URL(request.url).origin}/`;
-  if (redirect) body.redirect_uri = redirect;
+  // Sandbox: never send redirect_uri (unregistered URI breaks Link).
+  // Development/Production: send only if PLAID_REDIRECT_URI is set in the
+  // dashboard allowlist first.
+  const envName = (env.PLAID_ENV || "sandbox").toLowerCase().trim();
+  const redirect = (env.PLAID_REDIRECT_URI || "").trim();
+  if (envName !== "sandbox" && redirect) {
+    body.redirect_uri = redirect;
+  }
 
   const res = await plaidFetch(env, "/link/token/create", body);
-  const data = await res.json();
-  if (!res.ok) return json({ error: "link_token_failed", detail: data }, 502);
+  const data = (await res.json()) as Record<string, unknown>;
+  if (!res.ok) {
+    return json(
+      {
+        error: "link_token_failed",
+        detail: data,
+        debug: { plaid_env: envName, sent_redirect: Boolean(body.redirect_uri) },
+      },
+      502
+    );
+  }
   return json(data);
 }
 

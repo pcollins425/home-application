@@ -33,7 +33,13 @@ async function api(path, options = {}) {
     throw new Error("Unauthorized");
   }
   if (!res.ok) {
-    throw new Error(data.error || data.detail?.error_message || res.statusText);
+    const detail =
+      data.detail?.error_message ||
+      data.detail?.error_code ||
+      (typeof data.detail === "string" ? data.detail : null) ||
+      data.error ||
+      res.statusText;
+    throw new Error(detail);
   }
   return data;
 }
