@@ -9,6 +9,10 @@ export interface Env {
   PLAID_REDIRECT_URI?: string;
   PLAID_SEND_REDIRECT?: string;
   TRANSACTIONS_SINCE: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  SESSION_SECRET: string;
+  ALLOWED_EMAIL?: string;
 }
 
 type PlaidTx = {
@@ -469,29 +473,252 @@ async function handleApi(
 
 /** Serve under www.collinsmediallc.com/plaid* and also at workers.dev root. */
 const WWW_BASE = "/plaid";
+const COOKIE_NAME = "home_session";
+const DEFAULT_ALLOWED_EMAIL = "pcollins425@gmail.com";
 
 function rewritePath(pathname: string): {
   path: string;
   redirectedFromBareBase: boolean;
+  basePath: string;
 } {
   if (pathname === WWW_BASE) {
-    return { path: "/", redirectedFromBareBase: true };
+    return { path: "/", redirectedFromBareBase: true, basePath: WWW_BASE };
   }
   if (pathname.startsWith(`${WWW_BASE}/`)) {
-    return { path: pathname.slice(WWW_BASE.length) || "/", redirectedFromBareBase: false };
+    return {
+      path: pathname.slice(WWW_BASE.length) || "/",
+      redirectedFromBareBase: false,
+      basePath: WWW_BASE,
+    };
   }
-  return { path: pathname, redirectedFromBareBase: false };
+  return { path: pathname, redirectedFromBareBase: false, basePath: "" };
+}
+
+function allowedEmail(env: Env): string {
+  return (env.ALLOWED_EMAIL || DEFAULT_ALLOWED_EMAIL).trim().toLowerCase();
+}
+
+function b64url(bytes: ArrayBuffer | Uint8Array): string {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let s = "";
+  for (const b of u8) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function b64urlJson(obj: unknown): string {
+  return btoa(JSON.stringify(obj))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function hmacSign(secret: string, data: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(data)
+  );
+  return b64url(sig);
+}
+
+async function makeSessionCookie(
+  env: Env,
+  email: string,
+  basePath: string
+): Promise<string> {
+  const payload = {
+    email: email.toLowerCase(),
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 14,
+  };
+  const body = b64urlJson(payload);
+  const sig = await hmacSign(env.SESSION_SECRET, body);
+  const value = `${body}.${sig}`;
+  const path = basePath || "/";
+  return `${COOKIE_NAME}=${value}; Path=${path}; HttpOnly; Secure; SameSite=Lax; Max-Age=${60 * 60 * 24 * 14}`;
+}
+
+function clearSessionCookie(basePath: string): string {
+  const path = basePath || "/";
+  return `${COOKIE_NAME}=; Path=${path}; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+}
+
+function readCookie(request: Request, name: string): string | null {
+  const raw = request.headers.get("Cookie") || "";
+  for (const part of raw.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === name) return rest.join("=");
+  }
+  return null;
+}
+
+async function sessionEmail(
+  request: Request,
+  env: Env
+): Promise<string | null> {
+  if (!env.SESSION_SECRET) return null;
+  const raw = readCookie(request, COOKIE_NAME);
+  if (!raw || !raw.includes(".")) return null;
+  const [body, sig] = raw.split(".");
+  const expect = await hmacSign(env.SESSION_SECRET, body);
+  if (sig !== expect) return null;
+  try {
+    const pad = "=".repeat((4 - (body.length % 4)) % 4);
+    const json = atob((body + pad).replace(/-/g, "+").replace(/_/g, "/"));
+    const payload = JSON.parse(json) as { email?: string; exp?: number };
+    if (!payload.email || !payload.exp) return null;
+    if (payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload.email.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+async function requireGoogleUser(
+  request: Request,
+  env: Env,
+  basePath: string
+): Promise<{ email: string } | Response> {
+  const email = await sessionEmail(request, env);
+  if (email && email === allowedEmail(env)) return { email };
+  const login = `${basePath}/auth/login`;
+  if (request.headers.get("Accept")?.includes("text/html")) {
+    return Response.redirect(new URL(login, request.url).toString(), 302);
+  }
+  return json({ error: "unauthorized", login }, 401);
+}
+
+async function handleAuth(
+  request: Request,
+  env: Env,
+  path: string,
+  basePath: string
+): Promise<Response> {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.SESSION_SECRET) {
+    return json({ error: "google_auth_not_configured" }, 500);
+  }
+
+  const url = new URL(request.url);
+  const redirectUri = `${url.origin}${basePath}/auth/callback`;
+
+  if (path === "/auth/login") {
+    const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+    const params = new URLSearchParams({
+      client_id: env.GOOGLE_CLIENT_ID,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      access_type: "online",
+      prompt: "select_account",
+      state,
+    });
+    const res = Response.redirect(
+      `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
+      302
+    );
+    // store state in cookie briefly
+    res.headers.append(
+      "Set-Cookie",
+      `home_oauth_state=${state}; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
+    );
+    return res;
+  }
+
+  if (path === "/auth/logout") {
+    const res = Response.redirect(`${url.origin}${basePath || "/"}`, 302);
+    res.headers.append("Set-Cookie", clearSessionCookie(basePath));
+    return res;
+  }
+
+  if (path === "/auth/callback") {
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const saved = readCookie(request, "home_oauth_state");
+    if (!code || !state || !saved || state !== saved) {
+      return json({ error: "invalid_oauth_state" }, 400);
+    }
+
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: env.GOOGLE_CLIENT_ID,
+        client_secret: env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+    const tokenData = (await tokenRes.json()) as {
+      access_token?: string;
+      error?: string;
+      error_description?: string;
+    };
+    if (!tokenRes.ok || !tokenData.access_token) {
+      return json(
+        {
+          error: "token_exchange_failed",
+          detail: tokenData.error_description || tokenData.error,
+        },
+        502
+      );
+    }
+
+    const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const user = (await userRes.json()) as {
+      email?: string;
+      verified_email?: boolean;
+    };
+    const email = (user.email || "").toLowerCase();
+    if (!userRes.ok || !email || user.verified_email === false) {
+      return json({ error: "email_unverified" }, 403);
+    }
+    if (email !== allowedEmail(env)) {
+      return new Response(
+        `Access denied for ${email}. This app is limited to ${allowedEmail(env)}.`,
+        { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } }
+      );
+    }
+
+    const res = Response.redirect(`${url.origin}${basePath || "/"}`, 302);
+    res.headers.append(
+      "Set-Cookie",
+      await makeSessionCookie(env, email, basePath)
+    );
+    res.headers.append(
+      "Set-Cookie",
+      `home_oauth_state=; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
+    );
+    return res;
+  }
+
+  return json({ error: "not_found" }, 404);
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const { path, redirectedFromBareBase } = rewritePath(url.pathname);
+    const { path, redirectedFromBareBase, basePath } = rewritePath(url.pathname);
 
     if (redirectedFromBareBase) {
       url.pathname = `${WWW_BASE}/`;
       return Response.redirect(url.toString(), 302);
     }
+
+    if (path.startsWith("/auth/")) {
+      return handleAuth(request, env, path, basePath);
+    }
+
+    const gate = await requireGoogleUser(request, env, basePath);
+    if (gate instanceof Response) return gate;
 
     if (path.startsWith("/api/")) {
       return handleApi(request, env, path);

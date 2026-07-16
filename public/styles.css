@@ -51,6 +51,8 @@ h1 { margin: 0.2rem 0; font-size: 1.85rem; font-weight: 650; }
   border-radius: 8px;
   cursor: pointer;
   font: inherit;
+  text-decoration: none;
+  display: inline-block;
 }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn.primary {
