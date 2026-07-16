@@ -10,9 +10,10 @@ export interface Env {
   PLAID_SEND_REDIRECT?: string;
   TRANSACTIONS_SINCE: string;
   GOOGLE_CLIENT_ID: string;
-  GOOGLE_CLIENT_SECRET: string;
+  GOOGLE_CLIENT_SECRET?: string;
   SESSION_SECRET: string;
   ALLOWED_EMAIL?: string;
+  ACCESS_PASSWORD?: string;
 }
 
 type PlaidTx = {
@@ -598,110 +599,111 @@ async function requireGoogleUser(
   return json({ error: "unauthorized", login }, 401);
 }
 
+async function verifyGoogleIdToken(
+  env: Env,
+  idToken: string
+): Promise<{ email: string }> {
+  const res = await fetch(
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
+  );
+  const info = (await res.json()) as {
+    aud?: string;
+    email?: string;
+    email_verified?: string | boolean;
+    error?: string;
+  };
+  if (!res.ok || info.error) {
+    throw new Error(info.error || "invalid_google_token");
+  }
+  if (info.aud !== env.GOOGLE_CLIENT_ID) {
+    throw new Error("google_token_audience_mismatch");
+  }
+  const email = (info.email || "").toLowerCase();
+  const verified =
+    info.email_verified === true || info.email_verified === "true";
+  if (!email || !verified) throw new Error("email_unverified");
+  if (email !== allowedEmail(env)) {
+    throw new Error(`access_denied:${email}`);
+  }
+  return { email };
+}
+
 async function handleAuth(
   request: Request,
   env: Env,
   path: string,
   basePath: string
 ): Promise<Response> {
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.SESSION_SECRET) {
-    return json({ error: "google_auth_not_configured" }, 500);
+  if (!env.SESSION_SECRET) {
+    return json({ error: "session_not_configured" }, 500);
   }
 
   const url = new URL(request.url);
-  const redirectUri = `${url.origin}${basePath}/auth/callback`;
 
-  if (path === "/auth/login") {
-    const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
-    const params = new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID,
-      redirect_uri: redirectUri,
-      response_type: "code",
-      scope: "openid email profile",
-      access_type: "online",
-      prompt: "select_account",
-      state,
+  if (path === "/auth/config" && request.method === "GET") {
+    return json({
+      google_client_id: env.GOOGLE_CLIENT_ID || null,
+      allowed_email: allowedEmail(env),
+      password_enabled: Boolean(env.ACCESS_PASSWORD),
     });
-    return new Response(null, {
-      status: 302,
-      headers: {
-        Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
-        "Set-Cookie": `home_oauth_state=${state}; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
-      },
+  }
+
+  if (path === "/auth/login" && request.method === "GET") {
+    // Our login page (not a bounce to Google — that caused redirect_uri_mismatch HTML).
+    const assetUrl = new URL(request.url);
+    assetUrl.pathname = "/login.html";
+    const assetRes = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+    const headers = new Headers(assetRes.headers);
+    headers.set("Cache-Control", "no-store");
+    return new Response(assetRes.body, {
+      status: assetRes.status,
+      headers,
     });
   }
 
   if (path === "/auth/logout") {
+    const dest = `${url.origin}${basePath}/auth/login`;
     return new Response(null, {
       status: 302,
       headers: {
-        Location: `${url.origin}${basePath || "/"}`,
+        Location: dest,
         "Set-Cookie": clearSessionCookie(basePath),
       },
     });
   }
 
-  if (path === "/auth/callback") {
-    const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
-    const saved = readCookie(request, "home_oauth_state");
-    if (!code || !state || !saved || state !== saved) {
-      return json({ error: "invalid_oauth_state" }, 400);
-    }
-
-    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: env.GOOGLE_CLIENT_ID,
-        client_secret: env.GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
-    });
-    const tokenData = (await tokenRes.json()) as {
-      access_token?: string;
-      error?: string;
-      error_description?: string;
+  if (path === "/auth/session" && request.method === "POST") {
+    const body = (await request.json().catch(() => ({}))) as {
+      google_token?: string;
+      password?: string;
     };
-    if (!tokenRes.ok || !tokenData.access_token) {
-      return json(
-        {
-          error: "token_exchange_failed",
-          detail: tokenData.error_description || tokenData.error,
-        },
-        502
-      );
-    }
 
-    const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` },
-    });
-    const user = (await userRes.json()) as {
-      email?: string;
-      verified_email?: boolean;
-    };
-    const email = (user.email || "").toLowerCase();
-    if (!userRes.ok || !email || user.verified_email === false) {
-      return json({ error: "email_unverified" }, 403);
-    }
-    if (email !== allowedEmail(env)) {
-      return new Response(
-        `Access denied for ${email}. This app is limited to ${allowedEmail(env)}.`,
-        { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } }
-      );
-    }
+    try {
+      let email: string | null = null;
+      if (body.google_token) {
+        if (!env.GOOGLE_CLIENT_ID) {
+          return json({ error: "google_not_configured" }, 500);
+        }
+        email = (await verifyGoogleIdToken(env, body.google_token)).email;
+      } else if (body.password != null) {
+        if (!env.ACCESS_PASSWORD || body.password !== env.ACCESS_PASSWORD) {
+          return json({ error: "invalid_password" }, 401);
+        }
+        email = allowedEmail(env);
+      } else {
+        return json({ error: "google_token_or_password_required" }, 400);
+      }
 
-    const headers = new Headers({
-      Location: `${url.origin}${basePath || "/"}`,
-    });
-    headers.append("Set-Cookie", await makeSessionCookie(env, email, basePath));
-    headers.append(
-      "Set-Cookie",
-      `home_oauth_state=; Path=${basePath || "/"}; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
-    );
-    return new Response(null, { status: 302, headers });
+      const headers = new Headers({ "Content-Type": "application/json" });
+      headers.append("Set-Cookie", await makeSessionCookie(env, email, basePath));
+      return new Response(JSON.stringify({ ok: true, email }), { status: 200, headers });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.startsWith("access_denied:")) {
+        return json({ error: "access_denied", detail: msg.slice("access_denied:".length) }, 403);
+      }
+      return json({ error: msg }, 401);
+    }
   }
 
   return json({ error: "not_found" }, 404);
@@ -715,7 +717,7 @@ function isAuthed(
 
 /** CSS/JS must not hit the Google redirect — browsers treat that as broken styles. */
 function isStaticAsset(path: string): boolean {
-  return /\.(css|js|map|ico|png|jpe?g|gif|svg|webp|woff2?)$/i.test(path);
+  return /\.(css|js|map|ico|png|jpe?g|gif|svg|webp|woff2?|html)$/i.test(path);
 }
 
 export default {

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Home</title>
+  <link rel="stylesheet" href="styles.css?v=6" />
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card gate" style="max-width:420px;margin:4rem auto;">
+      <p class="eyebrow">Home application</p>
+      <h1 style="margin:0.2rem 0 0.5rem;font-size:1.5rem;">Sign in</h1>
+      <p class="sub" id="msg">Use Google — only pcollins425@gmail.com is allowed.</p>
+      <div id="googleBtn" style="margin:1.25rem 0;min-height:44px;"></div>
+      <p id="err" style="color:#e86a6a;font-size:0.9rem;display:none;"></p>
+      <hr style="border:none;border-top:1px solid var(--line);margin:1.25rem 0;" />
+      <p class="sub">Or site password</p>
+      <form id="pwForm" class="gate-form" style="margin-top:0.5rem;">
+        <input id="pw" type="password" autocomplete="current-password" placeholder="Access password" required />
+        <button type="submit" class="btn primary">Sign in</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const API_BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
+    const errEl = document.getElementById("err");
+    const msgEl = document.getElementById("msg");
+
+    function showErr(t) {
+      errEl.style.display = "block";
+      errEl.textContent = t;
+    }
+
+    async function finishSession(body) {
+      const res = await fetch(API_BASE + "/auth/session", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.detail || res.statusText);
+      location.href = API_BASE + "/";
+    }
+
+    window.__onGoogle = async (response) => {
+      try {
+        msgEl.textContent = "Checking Google account…";
+        await finishSession({ google_token: response.credential });
+      } catch (e) {
+        showErr(String(e.message || e));
+      }
+    };
+
+    document.getElementById("pwForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await finishSession({ password: document.getElementById("pw").value });
+      } catch (err) {
+        showErr(String(err.message || err));
+      }
+    });
+
+    fetch(API_BASE + "/auth/config", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cfg.allowed_email) {
+          msgEl.textContent = "Use Google — only " + cfg.allowed_email + " is allowed.";
+        }
+        if (!cfg.google_client_id) {
+          showErr("Google client not configured on the Worker.");
+          return;
+        }
+        const start = () => {
+          if (!window.google || !google.accounts || !google.accounts.id) {
+            setTimeout(start, 50);
+            return;
+          }
+          google.accounts.id.initialize({
+            client_id: cfg.google_client_id,
+            callback: window.__onGoogle,
+            auto_select: false,
+            cancel_on_tap_outside: true,
+          });
+          google.accounts.id.renderButton(document.getElementById("googleBtn"), {
+            type: "standard",
+            theme: "outline",
+            size: "large",
+            width: 360,
+            text: "signin_with",
+          });
+        };
+        start();
+      })
+      .catch((e) => showErr(String(e.message || e)));
+  </script>
+</body>
+</html>
