@@ -44,24 +44,21 @@ npx wrangler d1 migrations apply home_plaid --remote
 
 ### 3. Secrets (cloud-only)
 
-From the credential USB (do **not** commit). For a **real** bank Link use **Development** keys (`PLAID_ENV=development`), not Sandbox.
+From the credential USB (do **not** commit). For a **real** bank Link use **Production** keys (`PLAID_ENV=production` on the Worker — already set for this bridge).
 
 ```bash
 npx wrangler secret put PLAID_CLIENT_ID
 npx wrangler secret put PLAID_SECRET
 npx wrangler secret put ACCESS_KEY          # pick a long random passphrase for the UI
-# optional if not using wrangler.toml [vars]:
-# npx wrangler secret put PLAID_ENV
 ```
 
-Optional redirect (OAuth banks) — register the same URL in the [Plaid dashboard](https://dashboard.plaid.com/developers/api):
+Redirect URI is **opt-in**: leave `PLAID_SEND_REDIRECT=false` until the URI is allowlisted in the Plaid dashboard. Then:
 
 ```bash
 npx wrangler secret put PLAID_REDIRECT_URI
-# e.g. https://home-application.<account>.workers.dev/
-# or https://plaid-test.collinsmediallc.com/
+# e.g. https://home-application.paul-collins.workers.dev/
+# set PLAID_SEND_REDIRECT = "true" in wrangler.toml [vars] and redeploy
 ```
-
 ### 4. Deploy
 
 ```bash
