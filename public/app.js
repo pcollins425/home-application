@@ -54,13 +54,16 @@ function escapeHtml(s) {
 }
 
 async function prefetchLinkToken() {
+  if (linkBtn) linkBtn.disabled = true;
   linkTokenPromise = api("/api/create_link_token", { method: "POST" })
     .then((data) => {
       cachedLinkToken = data.link_token || null;
+      if (linkBtn) linkBtn.disabled = !cachedLinkToken;
       return cachedLinkToken;
     })
     .catch((err) => {
       cachedLinkToken = null;
+      if (linkBtn) linkBtn.disabled = false;
       console.error("link_token prefetch failed", err);
       return null;
     });
@@ -130,55 +133,35 @@ async function refresh() {
   prefetchLinkToken();
 }
 
-async function openPlaidLink(linkToken) {
-  if (typeof Plaid === "undefined") {
-    throw new Error("Plaid script failed to load — check network / ad blockers");
-  }
-  return new Promise((resolve, reject) => {
-    const handler = Plaid.create({
-      token: linkToken,
-      onSuccess: async (public_token, metadata) => {
-        try {
+if (linkBtn) {
+  linkBtn.disabled = true;
+  linkBtn.addEventListener("click", async () => {
+    linkBtn.disabled = true;
+    statusLine.textContent = "Opening bank login…";
+    try {
+      const token = cachedLinkToken;
+      if (!token) throw new Error("Bank login not ready yet — wait a second and try again");
+      if (typeof Plaid === "undefined") {
+        throw new Error("Plaid script failed to load — check network / ad blockers");
+      }
+      cachedLinkToken = null;
+      const handler = Plaid.create({
+        token,
+        onSuccess: async (public_token, metadata) => {
           statusLine.textContent = "Connecting and syncing…";
           await api("/api/exchange_public_token", {
             method: "POST",
             body: JSON.stringify({ public_token, metadata }),
           });
-          cachedLinkToken = null;
           await refresh();
-          resolve();
-        } catch (err) {
-          reject(err);
-        }
-      },
-      onExit: (err) => {
-        if (err) reject(err);
-        else resolve();
-      },
-    });
-    handler.open();
-  });
-}
-
-if (linkBtn) {
-  linkBtn.addEventListener("click", async () => {
-    linkBtn.disabled = true;
-    statusLine.textContent = "Opening bank login…";
-    try {
-      let token = cachedLinkToken;
-      if (!token) {
-        token = await (linkTokenPromise || prefetchLinkToken());
-      }
-      if (!token) {
-        token = (await api("/api/create_link_token", { method: "POST" })).link_token;
-      }
-      if (!token) throw new Error("Could not create link token");
-      cachedLinkToken = null; // one-time
-      await openPlaidLink(token);
+        },
+        onExit: () => {
+          prefetchLinkToken();
+        },
+      });
+      handler.open(); // sync with click — required on mobile
     } catch (err) {
       statusLine.textContent = String(err.message || err);
-    } finally {
-      linkBtn.disabled = false;
       prefetchLinkToken();
     }
   });
