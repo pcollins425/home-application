@@ -713,6 +713,11 @@ function isAuthed(
   return "email" in result;
 }
 
+/** CSS/JS must not hit the Google redirect — browsers treat that as broken styles. */
+function isStaticAsset(path: string): boolean {
+  return /\.(css|js|map|ico|png|jpe?g|gif|svg|webp|woff2?)$/i.test(path);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -733,8 +738,11 @@ export default {
       return handleApi(request, env, path);
     }
 
-    const gate = await requireGoogleUser(request, env, basePath, "html");
-    if (!isAuthed(gate)) return gate;
+    // Public static assets (no secrets). Gate HTML shell + API only.
+    if (!isStaticAsset(path)) {
+      const gate = await requireGoogleUser(request, env, basePath, "html");
+      if (!isAuthed(gate)) return gate;
+    }
 
     const assetUrl = new URL(request.url);
     assetUrl.pathname = path;
