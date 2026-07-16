@@ -485,13 +485,39 @@ async function handleApi(
   return json({ error: "not_found" }, 404);
 }
 
+/** Serve under www.collinsmediallc.com/plaid* and also at workers.dev root. */
+const WWW_BASE = "/plaid";
+
+function rewritePath(pathname: string): {
+  path: string;
+  redirectedFromBareBase: boolean;
+} {
+  if (pathname === WWW_BASE) {
+    return { path: "/", redirectedFromBareBase: true };
+  }
+  if (pathname.startsWith(`${WWW_BASE}/`)) {
+    return { path: pathname.slice(WWW_BASE.length) || "/", redirectedFromBareBase: false };
+  }
+  return { path: pathname, redirectedFromBareBase: false };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/")) {
-      return handleApi(request, env, url.pathname);
+    const { path, redirectedFromBareBase } = rewritePath(url.pathname);
+
+    if (redirectedFromBareBase) {
+      url.pathname = `${WWW_BASE}/`;
+      return Response.redirect(url.toString(), 302);
     }
-    return env.ASSETS.fetch(request);
+
+    if (path.startsWith("/api/")) {
+      return handleApi(request, env, path);
+    }
+
+    const assetUrl = new URL(request.url);
+    assetUrl.pathname = path;
+    return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
   },
 
   async scheduled(

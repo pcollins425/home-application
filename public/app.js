@@ -1,5 +1,8 @@
 const KEY_STORAGE = "home_app_access_key";
 
+/** works on workers.dev (/) and www.../plaid/ */
+const API_BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
+
 const gate = document.getElementById("gate");
 const app = document.getElementById("app");
 const gateForm = document.getElementById("gateForm");
@@ -25,7 +28,7 @@ async function api(path, options = {}) {
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
     sessionStorage.removeItem(KEY_STORAGE);
