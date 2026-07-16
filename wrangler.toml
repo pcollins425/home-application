@@ -7,7 +7,7 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "home_plaid"
-database_id = "REPLACE_AFTER_D1_CREATE"
+database_id = "697bca63-704b-42c8-a5a2-5aba6083f656"
 migrations_dir = "migrations"
 
 [assets]
@@ -32,7 +32,7 @@ crons = ["0 */4 * * *"]
 #   TRANSACTIONS_SINCE=2026-05-01
 
 [vars]
-PLAID_ENV = "development"
+PLAID_ENV = "sandbox"
 PLAID_PRODUCTS = "transactions"
 PLAID_COUNTRY_CODES = "US"
 TRANSACTIONS_SINCE = "2026-05-01"
