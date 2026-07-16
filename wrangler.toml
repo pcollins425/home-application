@@ -1,0 +1,38 @@
+# Placeholder until `wrangler d1 create home_plaid` — replace database_id, then deploy.
+name = "home-application"
+main = "src/index.ts"
+compatibility_date = "2025-07-15"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "home_plaid"
+database_id = "REPLACE_AFTER_D1_CREATE"
+migrations_dir = "migrations"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Poll Plaid while the home PC is off (no tunnel/webhooks for this bridge).
+[triggers]
+crons = ["0 */4 * * *"]
+
+# Secrets (cloud-only — never commit; rotate + re-Link on mini-PC cutover):
+#   wrangler secret put PLAID_CLIENT_ID
+#   wrangler secret put PLAID_SECRET
+#   wrangler secret put ACCESS_KEY
+#
+# Optional vars (can also be secrets):
+#   PLAID_ENV=development
+#   PLAID_PRODUCTS=transactions
+#   PLAID_COUNTRY_CODES=US
+#   PLAID_REDIRECT_URI=https://plaid-test.collinsmediallc.com/
+#   TRANSACTIONS_SINCE=2026-05-01
+
+[vars]
+PLAID_ENV = "development"
+PLAID_PRODUCTS = "transactions"
+PLAID_COUNTRY_CODES = "US"
+TRANSACTIONS_SINCE = "2026-05-01"
