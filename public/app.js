@@ -7,21 +7,39 @@ const rows = document.getElementById("rows");
 const linkBtn = document.getElementById("linkBtn");
 const syncBtn = document.getElementById("syncBtn");
 
-/** Prefetch so Plaid.open() stays inside the click gesture (mobile). */
 let cachedLinkToken = null;
 let linkTokenPromise = null;
+
+function setStatus(msg) {
+  if (statusLine) statusLine.textContent = msg;
+}
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "same-origin",
-    ...options,
-    headers,
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      credentials: "same-origin",
+      signal: ctrl.signal,
+      ...options,
+      headers,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err && err.name === "AbortError") {
+      throw new Error("Request timed out — try Sign out, then open /plaid/ again");
+    }
+    throw err;
+  }
+  clearTimeout(timer);
+
   if (res.status === 401) {
+    setStatus("Session expired — redirecting to Google sign-in…");
     location.href = `${API_BASE}/auth/login`;
     throw new Error("unauthorized");
   }
@@ -41,7 +59,6 @@ async function api(path, options = {}) {
 function money(n) {
   const v = Number(n);
   const sign = v > 0 ? "-" : v < 0 ? "+" : "";
-  // Plaid: positive amount = money leaving the account.
   return `${sign}$${Math.abs(v).toFixed(2)}`;
 }
 
@@ -71,6 +88,7 @@ async function prefetchLinkToken() {
 }
 
 async function refresh() {
+  setStatus("Fetching transactions…");
   const status = await api("/api/status");
   const syncClass =
     status.item?.last_sync_status === "ok"
@@ -83,61 +101,78 @@ async function refresh() {
     linkBtn.textContent = status.linked ? "Link another / replace" : "Log in to bank";
   }
 
-  statusLine.textContent = status.linked
-    ? `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · ${status.transaction_count} tx since ${status.transactions_since}`
-    : "Not linked — log in to your bank to pull May 2026 → now.";
+  setStatus(
+    status.linked
+      ? `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · ${status.transaction_count} tx since ${status.transactions_since}`
+      : "Not linked — log in to your bank to pull May 2026 → now."
+  );
 
-  meta.innerHTML = status.linked
-    ? `
+  if (meta) {
+    meta.innerHTML = status.linked
+      ? `
       <span>Last sync: <strong>${status.item?.last_sync_at || "—"}</strong>
         <span class="pill ${syncClass}">${status.item?.last_sync_status || "unknown"}</span>
       </span>
       ${status.item?.last_sync_error ? `<span>Error: <strong>${status.item.last_sync_error}</strong></span>` : ""}
     `
-    : `<span>Connect one account. Done.</span>`;
+      : `<span>Connect one account. Done.</span>`;
+  }
 
   if (!status.linked) {
-    rows.innerHTML = `<tr><td colspan="5" class="empty">No account linked yet.</td></tr>`;
+    if (rows) {
+      rows.innerHTML = `<tr><td colspan="5" class="empty">No account linked yet.</td></tr>`;
+    }
     prefetchLinkToken();
     return;
   }
 
+  setStatus(`Loading ${status.transaction_count || ""} transactions…`);
   const { transactions } = await api(
     `/api/transactions?since=${encodeURIComponent(status.transactions_since)}`
   );
 
   if (!transactions.length) {
-    rows.innerHTML = `<tr><td colspan="5" class="empty">No transactions yet — try Sync now (history can take a minute after Link).</td></tr>`;
+    if (rows) {
+      rows.innerHTML = `<tr><td colspan="5" class="empty">No transactions yet — try Sync now.</td></tr>`;
+    }
+    setStatus(
+      `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · 0 tx since ${status.transactions_since}`
+    );
     prefetchLinkToken();
     return;
   }
 
-  rows.innerHTML = transactions
-    .map((t) => {
-      const amt = Number(t.amount);
-      const cls = amt > 0 ? "neg" : "pos";
-      const pending = t.pending ? `<span class="pending">pending</span>` : "";
-      const account = [t.account_name, t.account_mask ? `••${t.account_mask}` : null]
-        .filter(Boolean)
-        .join(" ");
-      return `<tr>
+  if (rows) {
+    rows.innerHTML = transactions
+      .map((t) => {
+        const amt = Number(t.amount);
+        const cls = amt > 0 ? "neg" : "pos";
+        const pending = t.pending ? `<span class="pending">pending</span>` : "";
+        const account = [t.account_name, t.account_mask ? `••${t.account_mask}` : null]
+          .filter(Boolean)
+          .join(" ");
+        return `<tr>
         <td>${t.date}${pending}</td>
         <td class="amount ${cls}">${money(amt)}</td>
         <td>${escapeHtml(t.description || "—")}</td>
         <td>${escapeHtml(t.location || "—")}</td>
         <td>${escapeHtml(account || "—")}</td>
       </tr>`;
-    })
-    .join("");
+      })
+      .join("");
+  }
 
+  setStatus(
+    `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · ${transactions.length} tx since ${status.transactions_since}`
+  );
   prefetchLinkToken();
 }
 
 if (linkBtn) {
   linkBtn.disabled = true;
-  linkBtn.addEventListener("click", async () => {
+  linkBtn.addEventListener("click", () => {
     linkBtn.disabled = true;
-    statusLine.textContent = "Opening bank login…";
+    setStatus("Opening bank login…");
     try {
       const token = cachedLinkToken;
       if (!token) throw new Error("Bank login not ready yet — wait a second and try again");
@@ -148,7 +183,7 @@ if (linkBtn) {
       const handler = Plaid.create({
         token,
         onSuccess: async (public_token, metadata) => {
-          statusLine.textContent = "Connecting and syncing…";
+          setStatus("Connecting and syncing…");
           await api("/api/exchange_public_token", {
             method: "POST",
             body: JSON.stringify({ public_token, metadata }),
@@ -159,9 +194,9 @@ if (linkBtn) {
           prefetchLinkToken();
         },
       });
-      handler.open(); // sync with click — required on mobile
+      handler.open();
     } catch (err) {
-      statusLine.textContent = String(err.message || err);
+      setStatus(String(err.message || err));
       prefetchLinkToken();
     }
   });
@@ -170,19 +205,22 @@ if (linkBtn) {
 if (syncBtn) {
   syncBtn.addEventListener("click", async () => {
     syncBtn.disabled = true;
-    statusLine.textContent = "Syncing…";
+    setStatus("Syncing…");
     try {
       await api("/api/sync", { method: "POST" });
       await refresh();
     } catch (err) {
-      statusLine.textContent = String(err.message || err);
+      setStatus(String(err.message || err));
     } finally {
       syncBtn.disabled = false;
     }
   });
 }
 
+setStatus("Starting…");
 refresh().catch((err) => {
-  statusLine.textContent = String(err.message || err);
-  rows.innerHTML = `<tr><td colspan="5" class="empty">Could not load.</td></tr>`;
+  setStatus(String(err.message || err));
+  if (rows) {
+    rows.innerHTML = `<tr><td colspan="5" class="empty">Could not load: ${escapeHtml(String(err.message || err))}</td></tr>`;
+  }
 });

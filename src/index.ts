@@ -746,7 +746,18 @@ export default {
 
     const assetUrl = new URL(request.url);
     assetUrl.pathname = path;
-    return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+    const assetRes = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+    // Never cache the HTML shell — stale copies stick on "Loading…" without a session.
+    if (path === "/" || path.endsWith(".html")) {
+      const headers = new Headers(assetRes.headers);
+      headers.set("Cache-Control", "no-store, max-age=0");
+      return new Response(assetRes.body, {
+        status: assetRes.status,
+        statusText: assetRes.statusText,
+        headers,
+      });
+    }
+    return assetRes;
   },
 
   async scheduled(
