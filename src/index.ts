@@ -9,7 +9,6 @@ export interface Env {
   PLAID_REDIRECT_URI?: string;
   PLAID_SEND_REDIRECT?: string;
   TRANSACTIONS_SINCE: string;
-  ACCESS_KEY: string;
 }
 
 type PlaidTx = {
@@ -58,19 +57,6 @@ function json(data: unknown, status = 200): Response {
       "Cache-Control": "no-store",
     },
   });
-}
-
-function unauthorized(): Response {
-  return json({ error: "unauthorized" }, 401);
-}
-
-function requireAccess(request: Request, env: Env): boolean {
-  const key = env.ACCESS_KEY;
-  if (!key) return false;
-  const header = request.headers.get("Authorization") || "";
-  const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  const urlKey = new URL(request.url).searchParams.get("key") || "";
-  return bearer === key || urlKey === key;
 }
 
 async function createLinkToken(env: Env, request: Request): Promise<Response> {
@@ -452,10 +438,6 @@ async function handleApi(
   if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET) {
     return json({ error: "plaid_secrets_missing" }, 500);
   }
-  if (!env.ACCESS_KEY) {
-    return json({ error: "ACCESS_KEY secret not set" }, 500);
-  }
-  if (!requireAccess(request, env)) return unauthorized();
 
   if (path === "/api/status" && request.method === "GET") {
     return status(env);

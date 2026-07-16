@@ -1,40 +1,19 @@
-const KEY_STORAGE = "home_app_access_key";
-
 /** works on workers.dev (/) and www.../plaid/ */
 const API_BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
 
-const gate = document.getElementById("gate");
-const app = document.getElementById("app");
-const gateForm = document.getElementById("gateForm");
-const accessKeyInput = document.getElementById("accessKey");
 const statusLine = document.getElementById("statusLine");
 const meta = document.getElementById("meta");
 const rows = document.getElementById("rows");
 const linkBtn = document.getElementById("linkBtn");
 const syncBtn = document.getElementById("syncBtn");
 
-function getKey() {
-  return sessionStorage.getItem(KEY_STORAGE) || "";
-}
-
-function setKey(key) {
-  sessionStorage.setItem(KEY_STORAGE, key);
-}
-
 async function api(path, options = {}) {
-  const key = getKey();
   const headers = new Headers(options.headers || {});
-  headers.set("Authorization", `Bearer ${key}`);
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) {
-    sessionStorage.removeItem(KEY_STORAGE);
-    showGate();
-    throw new Error("Unauthorized");
-  }
   if (!res.ok) {
     const detail =
       data.detail?.error_message ||
@@ -54,19 +33,12 @@ function money(n) {
   return `${sign}$${Math.abs(v).toFixed(2)}`;
 }
 
-function showGate() {
-  gate.classList.remove("hidden");
-  app.classList.add("hidden");
-  linkBtn.disabled = true;
-  syncBtn.disabled = true;
-  statusLine.textContent = "Enter access key to continue.";
-}
-
-function showApp() {
-  gate.classList.add("hidden");
-  app.classList.remove("hidden");
-  linkBtn.disabled = false;
-  syncBtn.disabled = false;
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 async function refresh() {
@@ -78,9 +50,11 @@ async function refresh() {
         ? "err"
         : "warn";
 
+  linkBtn.textContent = status.linked ? "Link another / replace" : "Log in to bank";
+
   statusLine.textContent = status.linked
     ? `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · ${status.transaction_count} tx since ${status.transactions_since}`
-    : `Not linked yet · Plaid ${status.plaid_env}`;
+    : "Not linked — log in to your bank to pull May 2026 → now.";
 
   meta.innerHTML = status.linked
     ? `
@@ -88,12 +62,11 @@ async function refresh() {
         <span class="pill ${syncClass}">${status.item?.last_sync_status || "unknown"}</span>
       </span>
       ${status.item?.last_sync_error ? `<span>Error: <strong>${status.item.last_sync_error}</strong></span>` : ""}
-      <span>Env: <strong>${status.plaid_env}</strong></span>
     `
-    : `<span>Link one real account (Development) to pull May 2026 → now.</span>`;
+    : `<span>Connect one account. Done.</span>`;
 
   if (!status.linked) {
-    rows.innerHTML = `<tr><td colspan="5" class="empty">No account linked.</td></tr>`;
+    rows.innerHTML = `<tr><td colspan="5" class="empty">No account linked yet.</td></tr>`;
     return;
   }
 
@@ -125,26 +98,6 @@ async function refresh() {
     .join("");
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-gateForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  setKey(accessKeyInput.value.trim());
-  showApp();
-  try {
-    await refresh();
-  } catch (err) {
-    statusLine.textContent = String(err.message || err);
-    showGate();
-  }
-});
-
 linkBtn.addEventListener("click", async () => {
   linkBtn.disabled = true;
   try {
@@ -152,7 +105,7 @@ linkBtn.addEventListener("click", async () => {
     const handler = Plaid.create({
       token: link_token,
       onSuccess: async (public_token, metadata) => {
-        statusLine.textContent = "Exchanging token and syncing…";
+        statusLine.textContent = "Connecting and syncing…";
         await api("/api/exchange_public_token", {
           method: "POST",
           body: JSON.stringify({ public_token, metadata }),
@@ -183,9 +136,7 @@ syncBtn.addEventListener("click", async () => {
   }
 });
 
-if (getKey()) {
-  showApp();
-  refresh().catch(() => showGate());
-} else {
-  showGate();
-}
+refresh().catch((err) => {
+  statusLine.textContent = String(err.message || err);
+  rows.innerHTML = `<tr><td colspan="5" class="empty">Could not load.</td></tr>`;
+});

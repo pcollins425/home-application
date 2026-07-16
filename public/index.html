@@ -11,26 +11,17 @@
   <main class="wrap">
     <header class="header">
       <div>
-        <p class="eyebrow">Home application</p>
+        <p class="eyebrow">Plaid account</p>
         <h1>Transactions</h1>
-        <p class="sub" id="statusLine">Checking status…</p>
+        <p class="sub" id="statusLine">Loading…</p>
       </div>
       <div class="actions">
-        <button type="button" id="linkBtn" class="btn primary" disabled>Link account</button>
-        <button type="button" id="syncBtn" class="btn" disabled>Sync now</button>
+        <button type="button" id="linkBtn" class="btn primary">Log in to bank</button>
+        <button type="button" id="syncBtn" class="btn">Sync now</button>
       </div>
     </header>
 
-    <section id="gate" class="card gate">
-      <h2>Access key</h2>
-      <p>Enter the <code>ACCESS_KEY</code> Worker secret to load the dashboard.</p>
-      <form id="gateForm" class="gate-form">
-        <input id="accessKey" type="password" autocomplete="current-password" placeholder="ACCESS_KEY" required />
-        <button type="submit" class="btn primary">Unlock</button>
-      </form>
-    </section>
-
-    <section id="app" class="hidden">
+    <section id="app">
       <div class="meta" id="meta"></div>
       <div class="table-wrap card">
         <table>
@@ -44,7 +35,7 @@
             </tr>
           </thead>
           <tbody id="rows">
-            <tr><td colspan="5" class="empty">No transactions yet.</td></tr>
+            <tr><td colspan="5" class="empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
