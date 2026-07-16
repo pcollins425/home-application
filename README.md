@@ -70,11 +70,11 @@ npm run deploy
 
 Open the Worker URL → unlock with `ACCESS_KEY` → **Link account** → **Sync now** if the table is empty for a minute.
 
+**Note:** If `*.workers.dev` returns Cloudflare error **1042**, enable the workers.dev subdomain for that Worker (Settings → Domains, or API `POST .../scripts/<name>/subdomain` with `{"enabled":true}`).
+
 ### 5. Custom domain (collinsmediallc.com)
 
-In Cloudflare dashboard: Workers → `home-application` → Triggers → Custom Domains  
-(or a route like `plaid-test.collinsmediallc.com/*`).  
-Then set `PLAID_REDIRECT_URI` to that origin and register it in Plaid.
+Add DNS for `plaid-test` (proxied) or use **Workers → Custom Domains** in the dashboard. `wrangler.toml` already declares route `plaid-test.collinsmediallc.com/*`. Then set `PLAID_REDIRECT_URI` to that origin and register it in Plaid.
 
 ## API (all require `Authorization: Bearer <ACCESS_KEY>`)
 

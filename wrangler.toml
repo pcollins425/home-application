@@ -4,6 +4,12 @@ main = "src/index.ts"
 compatibility_date = "2025-07-15"
 workers_dev = true
 
+# Optional custom host (DNS must exist / be proxied on collinsmediallc.com):
+# In dashboard: Workers → home-application → Domains, or add DNS + keep this route.
+[[routes]]
+pattern = "plaid-test.collinsmediallc.com/*"
+zone_name = "collinsmediallc.com"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "home_plaid"
