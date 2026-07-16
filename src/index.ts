@@ -649,14 +649,16 @@ async function handleAuth(
   }
 
   if (path === "/auth/login" && request.method === "GET") {
-    // Our login page (not a bounce to Google — that caused redirect_uri_mismatch HTML).
-    const assetUrl = new URL(request.url);
-    assetUrl.pathname = "/login.html";
-    const assetRes = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
-    const headers = new Headers(assetRes.headers);
+    // Assets rewrites login.html → /login; fetch that pretty path and return it
+    // (do not pass through the 307 Location:/login — that breaks under /plaid).
+    const loginAsset = await env.ASSETS.fetch(
+      new Request(new URL("/login", request.url), request)
+    );
+    const headers = new Headers(loginAsset.headers);
     headers.set("Cache-Control", "no-store");
-    return new Response(assetRes.body, {
-      status: assetRes.status,
+    headers.delete("Location");
+    return new Response(loginAsset.body, {
+      status: loginAsset.status === 307 || loginAsset.status === 302 ? 200 : loginAsset.status,
       headers,
     });
   }
@@ -732,6 +734,16 @@ export default {
 
     if (path.startsWith("/auth/")) {
       return handleAuth(request, env, path, basePath);
+    }
+
+    // Public pretty login path (Cloudflare Assets maps login.html → /login)
+    if (path === "/login" || path === "/login/") {
+      const loginAsset = await env.ASSETS.fetch(
+        new Request(new URL("/login", request.url), request)
+      );
+      const headers = new Headers(loginAsset.headers);
+      headers.set("Cache-Control", "no-store");
+      return new Response(loginAsset.body, { status: 200, headers });
     }
 
     if (path.startsWith("/api/")) {
