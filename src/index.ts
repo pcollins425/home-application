@@ -7,6 +7,7 @@ export interface Env {
   PLAID_PRODUCTS: string;
   PLAID_COUNTRY_CODES: string;
   PLAID_REDIRECT_URI?: string;
+  PLAID_SEND_REDIRECT?: string;
   TRANSACTIONS_SINCE: string;
   ACCESS_KEY: string;
 }
@@ -90,28 +91,31 @@ async function createLinkToken(env: Env, request: Request): Promise<Response> {
     language: "en",
   };
 
-  // Sandbox: never send redirect_uri (unregistered URI breaks Link).
-  // Development/Production: send only if PLAID_REDIRECT_URI is set in the
-  // dashboard allowlist first.
-  const envName = (env.PLAID_ENV || "sandbox").toLowerCase().trim();
-  const redirect = (env.PLAID_REDIRECT_URI || "").trim();
-  if (envName !== "sandbox" && redirect) {
-    body.redirect_uri = redirect;
+  // Only send redirect_uri when allowlisted in Plaid dashboard AND enabled.
+  // Sending an unregistered URI breaks /link/token/create (INVALID_FIELD).
+  // Set PLAID_SEND_REDIRECT=true in [vars] after adding the URI in the dashboard.
+  const sendRedirect = (env.PLAID_SEND_REDIRECT || "").toLowerCase() === "true"
+  const redirect = (env.PLAID_REDIRECT_URI || "").trim()
+  if (sendRedirect && redirect) {
+    body.redirect_uri = redirect
   }
 
-  const res = await plaidFetch(env, "/link/token/create", body);
-  const data = (await res.json()) as Record<string, unknown>;
+  const res = await plaidFetch(env, "/link/token/create", body)
+  const data = (await res.json()) as Record<string, unknown>
   if (!res.ok) {
     return json(
       {
         error: "link_token_failed",
         detail: data,
-        debug: { plaid_env: envName, sent_redirect: Boolean(body.redirect_uri) },
+        debug: {
+          plaid_env: (env.PLAID_ENV || "").toLowerCase(),
+          sent_redirect: Boolean(body.redirect_uri),
+        },
       },
       502
-    );
+    )
   }
-  return json(data);
+  return json(data)
 }
 
 async function exchangePublicToken(
@@ -468,6 +472,14 @@ async function handleApi(
   }
   if (path === "/api/transactions" && request.method === "GET") {
     return listTransactions(env, request);
+  }
+  if (path === "/api/reset" && request.method === "POST") {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM transactions"),
+      env.DB.prepare("DELETE FROM accounts"),
+      env.DB.prepare("DELETE FROM plaid_items"),
+    ]);
+    return json({ ok: true, cleared: true });
   }
 
   return json({ error: "not_found" }, 404);

@@ -38,7 +38,9 @@ crons = ["0 */4 * * *"]
 #   TRANSACTIONS_SINCE=2026-05-01
 
 [vars]
-PLAID_ENV = "sandbox"
+PLAID_ENV = "production"
 PLAID_PRODUCTS = "transactions"
 PLAID_COUNTRY_CODES = "US"
 TRANSACTIONS_SINCE = "2026-05-01"
+# Set true only after allowlisting PLAID_REDIRECT_URI in Plaid dashboard
+PLAID_SEND_REDIRECT = "false"
