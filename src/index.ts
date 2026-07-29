@@ -511,7 +511,6 @@ async function syncAll(env: Env, opts: { full?: boolean } = {}) {
   for (const row of results || []) {
     if (opts.full) {
       // Empty cursor = Plaid re-sends all history it has for the Item (as adds).
-      // Still cannot invent months the institution never provided.
       await env.DB.prepare(
         `UPDATE plaid_items SET cursor = NULL WHERE item_id = ?`
       )
@@ -526,6 +525,96 @@ async function syncAll(env: Env, opts: { full?: boolean } = {}) {
         opts.full ? null : row.cursor
       )
     );
+  }
+  return out;
+}
+
+/**
+ * Pull a concrete date window from Plaid via /transactions/get (supports
+ * start_date/end_date). /transactions/sync does not — ranges only filtered D1
+ * before. Upserts into D1; does not burn a new Item slot.
+ */
+async function backfillItem(
+  env: Env,
+  itemId: string,
+  accessToken: string,
+  since: string,
+  until: string
+): Promise<{ ok: boolean; stored: number; pages: number; error?: string }> {
+  await upsertAccounts(env, itemId, accessToken);
+
+  let offset = 0;
+  let pages = 0;
+  let stored = 0;
+  const pageSize = 500;
+
+  try {
+    for (;;) {
+      const res = await plaidFetch(env, "/transactions/get", {
+        access_token: accessToken,
+        start_date: since,
+        end_date: until,
+        options: { count: pageSize, offset },
+      });
+      const data = (await res.json()) as {
+        transactions?: PlaidTx[];
+        total_transactions?: number;
+        error_code?: string;
+        error_message?: string;
+      };
+
+      if (!res.ok) {
+        const err = data.error_message || data.error_code || "backfill_failed";
+        await env.DB.prepare(
+          `UPDATE plaid_items SET last_sync_at = ?, last_sync_status = 'error', last_sync_error = ? WHERE item_id = ?`
+        )
+          .bind(new Date().toISOString(), err, itemId)
+          .run();
+        return { ok: false, stored, pages, error: err };
+      }
+
+      const txs = data.transactions || [];
+      pages += 1;
+      const page = await applyTransactionPage(env, itemId, txs, [], []);
+      stored += page.stored;
+      offset += txs.length;
+
+      const total = data.total_transactions ?? offset;
+      if (offset >= total || txs.length === 0) break;
+    }
+
+    await env.DB.prepare(
+      `UPDATE plaid_items
+       SET last_sync_at = ?, last_sync_status = 'ok', last_sync_error = NULL
+       WHERE item_id = ?`
+    )
+      .bind(new Date().toISOString(), itemId)
+      .run();
+
+    return { ok: true, stored, pages };
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    await env.DB.prepare(
+      `UPDATE plaid_items SET last_sync_at = ?, last_sync_status = 'error', last_sync_error = ? WHERE item_id = ?`
+    )
+      .bind(new Date().toISOString(), err, itemId)
+      .run();
+    return { ok: false, stored, pages, error: err };
+  }
+}
+
+async function backfillAll(
+  env: Env,
+  since: string,
+  until: string
+): Promise<Array<{ ok: boolean; stored: number; pages: number; error?: string }>> {
+  const { results } = await env.DB.prepare(
+    "SELECT item_id, access_token FROM plaid_items"
+  ).all<{ item_id: string; access_token: string }>();
+
+  const out = [];
+  for (const row of results || []) {
+    out.push(await backfillItem(env, row.item_id, row.access_token, since, until));
   }
   return out;
 }
@@ -956,6 +1045,43 @@ async function handleApi(
       return json({
         ok: true,
         sync: { started: true, status: "syncing", items: results.length, full },
+      });
+    }
+    if (path === "/api/backfill" && request.method === "POST") {
+      // Date-ranged pull via /transactions/get (sync API has no start/end dates).
+      const body = (await request.json().catch(() => ({}))) as {
+        since?: string;
+        until?: string;
+      };
+      const since = parseDateParam(body.since ?? null);
+      const until = parseDateParam(body.until ?? null);
+      if (!since || !until) {
+        return json(
+          { error: "since_and_until_required", detail: "YYYY-MM-DD" },
+          400
+        );
+      }
+      if (since > until) {
+        return json({ error: "since_after_until" }, 400);
+      }
+      const { results } = await env.DB.prepare(
+        "SELECT item_id FROM plaid_items"
+      ).all<{ item_id: string }>();
+      if (!results?.length) return json({ error: "not_linked" }, 400);
+      await env.DB.prepare(
+        `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL`
+      ).run();
+      ctx.waitUntil(backfillAll(env, since, until));
+      return json({
+        ok: true,
+        sync: {
+          started: true,
+          status: "syncing",
+          mode: "backfill",
+          since,
+          until,
+          items: results.length,
+        },
       });
     }
     if (path === "/api/transactions" && request.method === "GET") {

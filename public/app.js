@@ -208,7 +208,7 @@ function renderMeta(status) {
       : "no dates yet";
   meta.innerHTML = `
     <span>${status.item_count || 0} bank(s) · ${status.account_count || 0} accounts · ${status.transaction_count || 0} tx</span>
-    <span>Stored history: <strong>${escapeHtml(range)}</strong> <span class="hint">(D1 cache of what Plaid returned; wider ranges sync then re-check)</span></span>
+    <span>Stored history: <strong>${escapeHtml(range)}</strong> <span class="hint">(D1 cache; widen via Apply range or Pull older history — uses Plaid date window, not Sync cursor)</span></span>
     ${syncBits}
     ${err ? `<span>Error: <strong>${escapeHtml(err.last_sync_error)}</strong></span>` : ""}
   `;
@@ -533,39 +533,30 @@ async function applyRangeFromInputs() {
   const storedMax = lastStatus?.date_max || lastSummary?.date_max;
   const beforeStored = Boolean(storedMin && wantSince < storedMin);
   const afterStored = Boolean(storedMax && wantUntil > storedMax);
-  const outside = beforeStored || afterStored;
 
-  // Incremental Sync only returns *new* updates after the cursor — it does not
-  // fetch arbitrary older months. If the range is before date_min, try a one-time
-  // full history re-pull (empty cursor). Still limited to what Plaid has.
-  if (beforeStored && lastStatus?.linked) {
+  // Date ranges must be requested from Plaid via /transactions/get (backfill).
+  // Plain Sync has no start_date/end_date — that was the bug.
+  if ((beforeStored || afterStored) && lastStatus?.linked) {
     setStatus(
-      `Range starts before stored history (${storedMin}). Re-pulling full history from Plaid…`
+      `Pulling ${wantSince} → ${wantUntil} from Plaid into D1…`
     );
     try {
-      await api("/api/sync", {
+      await api("/api/backfill", {
         method: "POST",
-        body: JSON.stringify({ full: true }),
+        body: JSON.stringify({ since: wantSince, until: wantUntil }),
       });
       await waitForSync(300000);
       lastStatus = await api("/api/status");
       lastSummary = await api("/api/summary?all=1");
       renderMeta(lastStatus);
       renderTree(lastSummary);
+      const errItem = (lastStatus.items || []).find((i) => i.last_sync_error);
+      if (errItem?.last_sync_error) {
+        setStatus(`Backfill error: ${errItem.last_sync_error}`);
+      }
     } catch (err) {
       setStatus(String(err.message || err));
-    }
-  } else if (afterStored && lastStatus?.linked) {
-    setStatus("Range extends past latest stored tx — syncing new updates…");
-    try {
-      await api("/api/sync", { method: "POST", body: JSON.stringify({}) });
-      await waitForSync();
-      lastStatus = await api("/api/status");
-      lastSummary = await api("/api/summary?all=1");
-      renderMeta(lastStatus);
-      renderTree(lastSummary);
-    } catch (err) {
-      setStatus(String(err.message || err));
+      return;
     }
   }
 
@@ -603,16 +594,17 @@ async function applyRangeFromInputs() {
   try {
     await loadTransactions();
     const newMin = lastStatus?.date_min || lastSummary?.date_min;
+    const newMax = lastStatus?.date_max || lastSummary?.date_max;
     if (beforeStored && newMin && wantSince < newMin) {
       setStatus(
-        `Still no data before ${newMin}. Plaid/your banks only provided history from that date — a wider range cannot invent older months.`
+        `Pulled from Plaid; earliest in D1 is still ${newMin}. Institution may not expose older txs.`
       );
-    } else if (outside && (selection.tx_count || 0) === 0) {
-      setStatus("No transactions in that range after sync.");
-    } else if (!outside) {
+    } else if (afterStored && newMax && wantUntil > newMax) {
+      setStatus(`Pulled from Plaid; latest in D1 is ${newMax}.`);
+    } else {
       setStatus(
         lastStatus?.linked
-          ? `${lastStatus.account_count} account(s) · ${lastStatus.transaction_count} tx`
+          ? `${lastStatus.account_count} account(s) · ${lastStatus.transaction_count} tx · ${newMin || "?"} → ${newMax || "?"}`
           : "Not linked"
       );
     }
@@ -816,19 +808,31 @@ if (fullSyncBtn) {
   fullSyncBtn.addEventListener("click", async () => {
     fullSyncBtn.disabled = true;
     if (syncBtn) syncBtn.disabled = true;
-    setStatus("Full history pull from Plaid (all Items)…");
+    const until = new Date().toISOString().slice(0, 10);
+    // Two years back — explicit Plaid /transactions/get window (not sync cursor).
+    const sinceDate = new Date();
+    sinceDate.setFullYear(sinceDate.getFullYear() - 2);
+    const since = sinceDate.toISOString().slice(0, 10);
+    setStatus(`Pulling ${since} → ${until} from Plaid…`);
     try {
       const beforeMin = lastStatus?.date_min;
-      await api("/api/sync", {
+      await api("/api/backfill", {
         method: "POST",
-        body: JSON.stringify({ full: true }),
+        body: JSON.stringify({ since, until }),
       });
       await waitForSync(300000);
       await refresh();
       const afterMin = lastStatus?.date_min;
-      if (beforeMin && afterMin && afterMin >= beforeMin) {
+      const errItem = (lastStatus?.items || []).find((i) => i.last_sync_error);
+      if (errItem?.last_sync_error) {
+        setStatus(`Backfill error: ${errItem.last_sync_error}`);
+      } else if (beforeMin && afterMin && afterMin >= beforeMin) {
         setStatus(
-          `Full pull done. Earliest stored tx still ${afterMin} — Plaid has no older history for these banks.`
+          `Pull done. Earliest in D1: ${afterMin} (was ${beforeMin}). If unchanged, the bank isn’t giving older txs through Plaid.`
+        );
+      } else {
+        setStatus(
+          `Pull done. Stored history: ${afterMin || "?"} → ${lastStatus?.date_max || "?"}`
         );
       }
     } catch (err) {

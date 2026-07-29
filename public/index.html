@@ -6,7 +6,7 @@
   <title>Home — Transactions</title>
   <script>
     window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
-    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=14" />');
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=15" />');
   </script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 </head>
@@ -21,7 +21,7 @@
       <div class="actions">
         <button type="button" id="linkBtn" class="btn primary">Log in to bank</button>
         <button type="button" id="syncBtn" class="btn">Sync now</button>
-        <button type="button" id="fullSyncBtn" class="btn" title="Re-download all history Plaid has for linked banks">Full history pull</button>
+        <button type="button" id="fullSyncBtn" class="btn" title="Ask Plaid for a long date window via /transactions/get">Pull older history</button>
         <a id="logoutLink" class="btn" href="#">Sign out</a>
       </div>
     </header>
@@ -88,7 +88,7 @@
   </main>
   <script>
     document.getElementById("logoutLink").href = (window.__BASE || "") + "/auth/logout";
-    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=14"><\/script>');
+    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=15"><\/script>');
   </script>
 </body>
 </html>

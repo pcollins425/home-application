@@ -48,6 +48,7 @@ crons = ["0 */4 * * *"]
 PLAID_ENV = "production"
 PLAID_PRODUCTS = "transactions"
 PLAID_COUNTRY_CODES = "US"
+# Legacy display default only — not sent to Plaid. UI uses all=1 / since-until / backfill.
 TRANSACTIONS_SINCE = "2026-05-01"
 PLAID_SEND_REDIRECT = "false"
 ALLOWED_EMAIL = "pcollins425@gmail.com"
