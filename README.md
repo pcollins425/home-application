@@ -100,3 +100,6 @@ Date frames: `since` / `until` are inclusive `YYYY-MM-DD`. Pass `all=1` for no d
 - After Link, history can take seconds–minutes; use **Sync now** or wait for cron.
 - USB (`G:`) holds secrets source-of-truth; this repo on `E:` is code only.
 - **Link another bank** adds a connection. Full wipe is `/api/reset` only (not in the UI).
+- Account **balances** refresh on Sync (`/accounts/get` → D1). Loans show balance without requiring transactions.
+- Date ranges query D1 first. A range outside stored `date_min`/`date_max` triggers Sync (same Items — no extra Plaid slot). Plaid still only returns history the institution made available; empty range after sync means no older data upstream.
+- D1 free storage is ample at personal scale; prune-by-age later only if needed. Plaid Trial cost is **Items** (~10), not D1 bytes.

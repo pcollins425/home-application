@@ -198,20 +198,36 @@ async function upsertAccounts(
       mask?: string | null;
       subtype?: string | null;
       type?: string;
+      balances?: {
+        available?: number | null;
+        current?: number | null;
+        limit?: number | null;
+        iso_currency_code?: string | null;
+        unofficial_currency_code?: string | null;
+      };
     }>;
   };
   if (!res.ok || !data.accounts) return;
 
+  const now = new Date().toISOString();
   const stmts = data.accounts.map((a) =>
     env.DB.prepare(
-      `INSERT INTO accounts (account_id, item_id, name, official_name, mask, subtype, type)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO accounts (
+         account_id, item_id, name, official_name, mask, subtype, type,
+         balance_available, balance_current, balance_limit, balance_iso_currency, balance_updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_id) DO UPDATE SET
          name=excluded.name,
          official_name=excluded.official_name,
          mask=excluded.mask,
          subtype=excluded.subtype,
-         type=excluded.type`
+         type=excluded.type,
+         balance_available=excluded.balance_available,
+         balance_current=excluded.balance_current,
+         balance_limit=excluded.balance_limit,
+         balance_iso_currency=excluded.balance_iso_currency,
+         balance_updated_at=excluded.balance_updated_at`
     ).bind(
       a.account_id,
       itemId,
@@ -219,7 +235,14 @@ async function upsertAccounts(
       a.official_name ?? null,
       a.mask ?? null,
       a.subtype ?? null,
-      a.type ?? null
+      a.type ?? null,
+      a.balances?.available ?? null,
+      a.balances?.current ?? null,
+      a.balances?.limit ?? null,
+      a.balances?.iso_currency_code ??
+        a.balances?.unofficial_currency_code ??
+        null,
+      now
     )
   );
   if (stmts.length) await runBatch(env, stmts);
@@ -465,7 +488,8 @@ async function status(env: Env): Promise<Response> {
 
   const { results: accounts } = await env.DB.prepare(
     `SELECT a.account_id, a.item_id, a.name, a.official_name, a.mask, a.subtype, a.type,
-            i.institution_name
+            a.balance_available, a.balance_current, a.balance_limit, a.balance_iso_currency,
+            a.balance_updated_at, i.institution_name
      FROM accounts a
      LEFT JOIN plaid_items i ON i.item_id = a.item_id
      ORDER BY i.institution_name ASC, a.name ASC`
@@ -562,6 +586,13 @@ async function summary(env: Env, request: Request): Promise<Response> {
     account_id: string;
     name: string | null;
     mask: string | null;
+    subtype?: string | null;
+    type?: string | null;
+    balance_available?: number | null;
+    balance_current?: number | null;
+    balance_limit?: number | null;
+    balance_iso_currency?: string | null;
+    balance_updated_at?: string | null;
     years: YearNode[];
   };
   type InstNode = {
@@ -587,7 +618,9 @@ async function summary(env: Env, request: Request): Promise<Response> {
     acctWhere.push("a.item_id = ?");
     acctBinds.push(itemId);
   }
-  const acctSql = `SELECT a.account_id, a.item_id, a.name, a.mask, i.institution_name
+  const acctSql = `SELECT a.account_id, a.item_id, a.name, a.mask, a.subtype, a.type,
+            a.balance_available, a.balance_current, a.balance_limit, a.balance_iso_currency,
+            a.balance_updated_at, i.institution_name
      FROM accounts a
      LEFT JOIN plaid_items i ON i.item_id = a.item_id
      WHERE ${acctWhere.join(" AND ")}
@@ -599,6 +632,13 @@ async function summary(env: Env, request: Request): Promise<Response> {
         item_id: string;
         name: string | null;
         mask: string | null;
+        subtype: string | null;
+        type: string | null;
+        balance_available: number | null;
+        balance_current: number | null;
+        balance_limit: number | null;
+        balance_iso_currency: string | null;
+        balance_updated_at: string | null;
         institution_name: string | null;
       }>()
     : await acctStmt.all<{
@@ -606,6 +646,13 @@ async function summary(env: Env, request: Request): Promise<Response> {
         item_id: string;
         name: string | null;
         mask: string | null;
+        subtype: string | null;
+        type: string | null;
+        balance_available: number | null;
+        balance_current: number | null;
+        balance_limit: number | null;
+        balance_iso_currency: string | null;
+        balance_updated_at: string | null;
         institution_name: string | null;
       }>();
 
@@ -626,6 +673,13 @@ async function summary(env: Env, request: Request): Promise<Response> {
         account_id: a.account_id,
         name: a.name,
         mask: a.mask,
+        subtype: a.subtype,
+        type: a.type,
+        balance_available: a.balance_available,
+        balance_current: a.balance_current,
+        balance_limit: a.balance_limit,
+        balance_iso_currency: a.balance_iso_currency,
+        balance_updated_at: a.balance_updated_at,
         years: [],
       };
       acctMap.set(acctKey, acct);

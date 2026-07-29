@@ -204,7 +204,7 @@ function renderMeta(status) {
       : "no dates yet";
   meta.innerHTML = `
     <span>${status.item_count || 0} bank(s) · ${status.account_count || 0} accounts · ${status.transaction_count || 0} tx</span>
-    <span>Stored history: <strong>${escapeHtml(range)}</strong> <span class="hint">(what Plaid returned — not a UI cutoff)</span></span>
+    <span>Stored history: <strong>${escapeHtml(range)}</strong> <span class="hint">(D1 cache of what Plaid returned; wider ranges sync then re-check)</span></span>
     ${syncBits}
     ${err ? `<span>Error: <strong>${escapeHtml(err.last_sync_error)}</strong></span>` : ""}
   `;
@@ -212,6 +212,21 @@ function renderMeta(status) {
 
 function selectionKey(sel) {
   return [sel.itemId, sel.accountId, sel.year, sel.month].map((x) => x || "").join("|");
+}
+
+function formatBalance(acct) {
+  const cur = acct.balance_current;
+  if (cur == null || Number.isNaN(Number(cur))) return null;
+  const n = Number(cur);
+  const type = (acct.type || "").toLowerCase();
+  const subtype = (acct.subtype || "").toLowerCase();
+  const isLoan =
+    type === "loan" ||
+    subtype.includes("loan") ||
+    subtype.includes("mortgage") ||
+    subtype === "line of credit";
+  const label = isLoan ? "balance" : "bal";
+  return `${label} ${moneyAbs(n)}`;
 }
 
 function accountLabel(inst, acct) {
@@ -265,6 +280,8 @@ function renderTree(summary) {
           const acctName = [acct.name, acct.mask ? `••${acct.mask}` : null]
             .filter(Boolean)
             .join(" ");
+          const bal = formatBalance(acct);
+          const acctTitle = bal ? `${acctName} · ${bal}` : acctName;
           const hasMonths = (acct.years || []).some((y) => (y.months || []).length);
           const yearsHtml = hasMonths
             ? (acct.years || [])
@@ -299,13 +316,17 @@ function renderTree(summary) {
                   </div>`;
                 })
                 .join("")
-            : `<p class="nav-empty-acct">No transactions in stored history</p>`;
+            : `<p class="nav-empty-acct">${
+                (acct.type || "").toLowerCase() === "loan"
+                  ? "Loan — balance only (no transaction history from Plaid)"
+                  : "No transactions in stored history"
+              }</p>`;
           const acctActive =
             selection.accountId === acct.account_id && selection.mode !== "month"
               ? " active-acct"
               : "";
           return `<div class="nav-account${acctActive}">
-            <button type="button" class="nav-account-label" data-item="${escapeHtml(inst.item_id)}" data-account="${escapeHtml(acct.account_id)}">${escapeHtml(acctName || acct.account_id)}</button>
+            <button type="button" class="nav-account-label" data-item="${escapeHtml(inst.item_id)}" data-account="${escapeHtml(acct.account_id)}">${escapeHtml(acctTitle || acct.account_id)}</button>
             ${yearsHtml}
           </div>`;
         })
@@ -492,7 +513,7 @@ function pickDefaultSelection(summary) {
   return best;
 }
 
-function applyRangeFromInputs() {
+async function applyRangeFromInputs() {
   const from = rangeFrom?.value;
   const to = rangeTo?.value;
   if (!from || !to) {
@@ -501,6 +522,29 @@ function applyRangeFromInputs() {
   }
   const fromYm = from <= to ? from : to;
   const toYm = from <= to ? to : from;
+  const wantSince = monthSince(fromYm);
+  const wantUntil = monthUntil(toYm);
+
+  // Range can be outside what's already in D1. Sync asks Plaid for updates /
+  // whatever history it still has — it does NOT create a new Item (no extra
+  // free-tier slot). If Plaid never had those months, D1 stays empty for them.
+  const storedMin = lastStatus?.date_min || lastSummary?.date_min;
+  const storedMax = lastStatus?.date_max || lastSummary?.date_max;
+  const outside =
+    (storedMin && wantSince < storedMin) || (storedMax && wantUntil > storedMax);
+  if (outside && lastStatus?.linked) {
+    setStatus("Range extends past stored history — syncing with Plaid…");
+    try {
+      await api("/api/sync", { method: "POST" });
+      await waitForSync();
+      lastStatus = await api("/api/status");
+      lastSummary = await api("/api/summary?all=1");
+      renderMeta(lastStatus);
+    } catch (err) {
+      setStatus(String(err.message || err));
+    }
+  }
+
   const totals = totalsForRange(
     lastSummary,
     fromYm,
@@ -523,8 +567,8 @@ function applyRangeFromInputs() {
     accountId: selection.accountId,
     year: null,
     month: null,
-    since: monthSince(fromYm),
-    until: monthUntil(toYm),
+    since: wantSince,
+    until: wantUntil,
     label: `${scope} · ${monthLabel(fromYm)} → ${monthLabel(toYm)}`,
     mode: "range",
     ...totals,
@@ -532,7 +576,16 @@ function applyRangeFromInputs() {
   offset = 0;
   if (rangeClear) rangeClear.hidden = false;
   renderTree(lastSummary);
-  loadTransactions().catch((err) => setStatus(String(err.message || err)));
+  try {
+    await loadTransactions();
+    if ((selection.tx_count || 0) === 0 && outside) {
+      setStatus(
+        "No transactions in that range after sync — Plaid likely has no older history for these Items."
+      );
+    }
+  } catch (err) {
+    setStatus(String(err.message || err));
+  }
 }
 
 async function refresh() {
@@ -578,14 +631,17 @@ async function refresh() {
 
   lastSummary = await api("/api/summary?all=1");
 
-  // Bound month inputs to stored history when available
+  // Hint bounds from stored history, but do not lock the picker — user may
+  // request a wider range (triggers sync; still limited by what Plaid has).
   if (rangeFrom && rangeTo && lastSummary.date_min && lastSummary.date_max) {
     const minYm = lastSummary.date_min.slice(0, 7);
     const maxYm = lastSummary.date_max.slice(0, 7);
-    rangeFrom.min = minYm;
-    rangeFrom.max = maxYm;
-    rangeTo.min = minYm;
-    rangeTo.max = maxYm;
+    rangeFrom.min = "";
+    rangeTo.min = "";
+    rangeFrom.max = "";
+    rangeTo.max = "";
+    if (!rangeFrom.value) rangeFrom.value = minYm;
+    if (!rangeTo.value) rangeTo.value = maxYm;
   }
 
   if (selection.mode === "all" && !selection.accountId && !selection.month) {
