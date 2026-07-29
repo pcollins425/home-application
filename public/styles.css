@@ -24,7 +24,7 @@ body {
     radial-gradient(900px 500px at 100% 0%, #243028 0%, transparent 50%),
     var(--bg);
 }
-.wrap { max-width: 1100px; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
 .header {
   display: flex;
   flex-wrap: wrap;
@@ -159,7 +159,7 @@ code { font-family: var(--mono); font-size: 0.85em; }
   justify-content: space-between;
   margin-bottom: 0.75rem;
 }
-.search { flex: 1; min-width: 220px; max-width: 480px; }
+.search { flex: 1; min-width: 180px; max-width: 420px; }
 .search input {
   width: 100%;
   border: 1px solid var(--line);
@@ -194,3 +194,110 @@ code { font-family: var(--mono); font-size: 0.85em; }
   clip: rect(0, 0, 0, 0);
   border: 0;
 }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .layout { grid-template-columns: 1fr; }
+}
+.nav {
+  padding: 0.85rem 0.75rem;
+  position: sticky;
+  top: 0.75rem;
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+}
+.nav-label {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.nav-all {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  cursor: pointer;
+  margin-bottom: 0.75rem;
+}
+.nav-all.active,
+.nav-month.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.nav-empty { margin: 0; color: var(--muted); font-size: 0.88rem; }
+.nav-inst { margin-bottom: 1rem; }
+.nav-inst-label {
+  margin: 0 0 0.35rem;
+  font-weight: 650;
+  font-size: 0.95rem;
+}
+.nav-account { margin: 0.35rem 0 0.65rem 0.35rem; }
+.nav-account-label {
+  margin: 0 0 0.3rem;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+.nav-year { margin: 0 0 0.45rem 0.25rem; }
+.nav-year-label {
+  margin: 0 0 0.25rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.nav-month {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  border-radius: 7px;
+  padding: 0.35rem 0.45rem;
+  font: inherit;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.nav-month:hover { background: color-mix(in srgb, var(--panel) 80%, white); }
+.nav-month-net {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.scope {
+  margin: 0;
+  flex: 1 1 100%;
+  font-size: 0.92rem;
+  color: var(--text);
+  font-weight: 560;
+}
+.month-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1.1rem;
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.month-totals strong { font-family: var(--mono); font-weight: 600; }
+.month-totals .pos { color: #8fd9b0; }
+.month-totals .neg { color: #f0a0a0; }

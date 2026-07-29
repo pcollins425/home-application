@@ -396,6 +396,59 @@ async function syncAll(env: Env) {
   return out;
 }
 
+/** YYYY-MM-DD only; rejects junk. */
+function parseDateParam(raw: string | null): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return s;
+}
+
+/** Inclusive since/until from query. all=1 → no date filter. */
+function dateFrameFromUrl(url: URL): {
+  since: string | null;
+  until: string | null;
+  all: boolean;
+} {
+  const allRaw = (url.searchParams.get("all") || "").toLowerCase();
+  const all = allRaw === "1" || allRaw === "true";
+  const since = parseDateParam(url.searchParams.get("since"));
+  const until = parseDateParam(url.searchParams.get("until"));
+  if (all) return { since: null, until: null, all: true };
+  return { since, until, all: false };
+}
+
+function appendDateFrame(
+  where: string[],
+  binds: (string | number)[],
+  since: string | null,
+  until: string | null,
+  column = "t.date"
+): void {
+  if (since) {
+    where.push(`${column} >= ?`);
+    binds.push(since);
+  }
+  if (until) {
+    where.push(`${column} <= ?`);
+    binds.push(until);
+  }
+}
+
+type MonthAggRow = {
+  item_id: string;
+  institution_name: string | null;
+  account_id: string;
+  account_name: string | null;
+  account_mask: string | null;
+  year: string;
+  month: string;
+  tx_count: number;
+  inflow: number;
+  outflow: number;
+  pending_count: number;
+};
+
 async function status(env: Env): Promise<Response> {
   const { results: items } = await env.DB.prepare(
     `SELECT item_id, institution_name, linked_at, last_sync_at, last_sync_status, last_sync_error
@@ -418,17 +471,16 @@ async function status(env: Env): Promise<Response> {
      ORDER BY i.institution_name ASC, a.name ASC`
   ).all();
 
-  const since = env.TRANSACTIONS_SINCE || "2026-05-01";
   const countRow = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM transactions WHERE date >= ?"
-  )
-    .bind(since)
-    .first<{ n: number }>();
+    "SELECT COUNT(*) AS n FROM transactions"
+  ).first<{ n: number }>();
+  const range = await env.DB.prepare(
+    "SELECT MIN(date) AS date_min, MAX(date) AS date_max FROM transactions"
+  ).first<{ date_min: string | null; date_max: string | null }>();
 
   const itemList = items || [];
   const accountList = accounts || [];
   const syncing = itemList.some((i) => i.last_sync_status === "syncing");
-  // Back-compat for older UI: first item
   const item = itemList[0] || null;
 
   return json({
@@ -442,8 +494,137 @@ async function status(env: Env): Promise<Response> {
     can_link_more: accountList.length < MAX_LINKED_ACCOUNTS,
     syncing,
     transaction_count: countRow?.n ?? 0,
-    transactions_since: since,
+    date_min: range?.date_min ?? null,
+    date_max: range?.date_max ?? null,
+    // Legacy default window; UI now prefers explicit since/until or all=1.
+    transactions_since: env.TRANSACTIONS_SINCE || null,
     plaid_env: env.PLAID_ENV,
+  });
+}
+
+/**
+ * Institution → account → year → month rollups (In/Out/Net).
+ * Optional since/until (inclusive). Sort/aggregate only — no labels.
+ */
+async function summary(env: Env, request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const { since, until } = dateFrameFromUrl(url);
+  const accountId = (url.searchParams.get("account_id") || "").trim();
+  const itemId = (url.searchParams.get("item_id") || "").trim();
+
+  const where: string[] = ["1=1"];
+  const binds: (string | number)[] = [];
+  appendDateFrame(where, binds, since, until);
+  if (accountId) {
+    where.push("t.account_id = ?");
+    binds.push(accountId);
+  }
+  if (itemId) {
+    where.push("t.item_id = ?");
+    binds.push(itemId);
+  }
+
+  const summarySql = `SELECT
+       t.item_id AS item_id,
+       i.institution_name AS institution_name,
+       t.account_id AS account_id,
+       a.name AS account_name,
+       a.mask AS account_mask,
+       substr(t.date, 1, 4) AS year,
+       substr(t.date, 1, 7) AS month,
+       COUNT(*) AS tx_count,
+       SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END) AS inflow,
+       SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) AS outflow,
+       SUM(CASE WHEN t.pending = 1 THEN 1 ELSE 0 END) AS pending_count
+     FROM transactions t
+     LEFT JOIN accounts a ON a.account_id = t.account_id
+     LEFT JOIN plaid_items i ON i.item_id = t.item_id
+     WHERE ${where.join(" AND ")}
+     GROUP BY t.item_id, i.institution_name, t.account_id, a.name, a.mask,
+              substr(t.date, 1, 4), substr(t.date, 1, 7)
+     ORDER BY i.institution_name ASC, a.name ASC, month DESC`;
+  const summaryStmt = env.DB.prepare(summarySql);
+  const { results } = binds.length
+    ? await summaryStmt.bind(...binds).all<MonthAggRow>()
+    : await summaryStmt.all<MonthAggRow>();
+
+  type MonthNode = {
+    month: string;
+    year: string;
+    tx_count: number;
+    inflow: number;
+    outflow: number;
+    net: number;
+    pending_count: number;
+  };
+  type YearNode = { year: string; months: MonthNode[] };
+  type AccountNode = {
+    account_id: string;
+    name: string | null;
+    mask: string | null;
+    years: YearNode[];
+  };
+  type InstNode = {
+    item_id: string;
+    institution_name: string | null;
+    accounts: AccountNode[];
+  };
+
+  const institutions: InstNode[] = [];
+  const instMap = new Map<string, InstNode>();
+  const acctMap = new Map<string, AccountNode>();
+  const yearMap = new Map<string, YearNode>();
+
+  for (const row of results || []) {
+    let inst = instMap.get(row.item_id);
+    if (!inst) {
+      inst = {
+        item_id: row.item_id,
+        institution_name: row.institution_name,
+        accounts: [],
+      };
+      instMap.set(row.item_id, inst);
+      institutions.push(inst);
+    }
+
+    const acctKey = `${row.item_id}:${row.account_id}`;
+    let acct = acctMap.get(acctKey);
+    if (!acct) {
+      acct = {
+        account_id: row.account_id,
+        name: row.account_name,
+        mask: row.account_mask,
+        years: [],
+      };
+      acctMap.set(acctKey, acct);
+      inst.accounts.push(acct);
+    }
+
+    const yearKey = `${acctKey}:${row.year}`;
+    let yearNode = yearMap.get(yearKey);
+    if (!yearNode) {
+      yearNode = { year: row.year, months: [] };
+      yearMap.set(yearKey, yearNode);
+      acct.years.push(yearNode);
+    }
+
+    const inflow = Number(row.inflow) || 0;
+    const outflow = Number(row.outflow) || 0;
+    yearNode.months.push({
+      month: row.month,
+      year: row.year,
+      tx_count: Number(row.tx_count) || 0,
+      inflow,
+      outflow,
+      net: inflow - outflow,
+      pending_count: Number(row.pending_count) || 0,
+    });
+  }
+
+  return json({
+    since,
+    until,
+    institutions,
   });
 }
 
@@ -452,8 +633,11 @@ async function listTransactions(
   request: Request
 ): Promise<Response> {
   const url = new URL(request.url);
-  const since =
-    url.searchParams.get("since") || env.TRANSACTIONS_SINCE || "2026-05-01";
+  const { since, until, all } = dateFrameFromUrl(url);
+  // Default frame only when caller sent neither since/until nor all=1.
+  const effectiveSince =
+    since ??
+    (all || until ? null : env.TRANSACTIONS_SINCE || null);
   const q = (url.searchParams.get("q") || "").trim();
   const accountId = (url.searchParams.get("account_id") || "").trim();
   const itemId = (url.searchParams.get("item_id") || "").trim();
@@ -463,8 +647,9 @@ async function listTransactions(
   );
   const offset = Math.max(Number(url.searchParams.get("offset") || 0) || 0, 0);
 
-  const where: string[] = ["t.date >= ?"];
-  const binds: (string | number)[] = [since];
+  const where: string[] = ["1=1"];
+  const binds: (string | number)[] = [];
+  appendDateFrame(where, binds, effectiveSince, until);
 
   if (accountId) {
     where.push("t.account_id = ?");
@@ -487,7 +672,6 @@ async function listTransactions(
         COALESCE(i.institution_name, '') LIKE ?
       )`
     );
-    // Strip LIKE wildcards from user input (personal search — keep it simple).
     const like = `%${q.replace(/[%_]/g, "")}%`;
     for (let i = 0; i < 8; i++) binds.push(like);
   }
@@ -534,7 +718,9 @@ async function listTransactions(
     .all();
 
   return json({
-    since,
+    since: effectiveSince,
+    until,
+    all,
     q: q || null,
     account_id: accountId || null,
     item_id: itemId || null,
@@ -558,6 +744,9 @@ async function handleApi(
 
   if (path === "/api/status" && request.method === "GET") {
     return status(env);
+  }
+  if (path === "/api/summary" && request.method === "GET") {
+    return summary(env, request);
   }
   if (path === "/api/create_link_token" && request.method === "POST") {
     return createLinkToken(env, request);

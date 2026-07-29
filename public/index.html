@@ -5,9 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Home — Transactions</title>
   <script>
-    // Absolute asset URLs under /plaid/* (www) or / (workers.dev)
     window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
-    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=9" />');
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=10" />');
   </script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 </head>
@@ -28,45 +27,55 @@
 
     <section id="app">
       <div class="meta" id="meta"></div>
-      <div class="sources" id="sources"></div>
-      <div class="toolbar">
-        <label class="search">
-          <span class="sr-only">Search</span>
-          <input
-            type="search"
-            id="searchInput"
-            placeholder="Search description, account, bank, location…"
-            autocomplete="off"
-          />
-        </label>
-        <p class="result-meta" id="resultMeta"></p>
-      </div>
-      <div class="table-wrap card">
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Amount</th>
-              <th>Description</th>
-              <th>Bank</th>
-              <th>Account</th>
-              <th>Location</th>
-            </tr>
-          </thead>
-          <tbody id="rows">
-            <tr><td colspan="6" class="empty">Starting…</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="pager" id="pager" hidden>
-        <button type="button" class="btn" id="prevBtn">Previous</button>
-        <button type="button" class="btn" id="nextBtn">Next</button>
+      <div class="layout">
+        <aside class="nav card" id="nav">
+          <p class="nav-label">Accounts</p>
+          <button type="button" class="nav-all" id="navAll">All transactions</button>
+          <div id="tree"></div>
+        </aside>
+        <div class="main-pane">
+          <div class="toolbar">
+            <p class="scope" id="scopeLabel">All</p>
+            <label class="search">
+              <span class="sr-only">Search</span>
+              <input
+                type="search"
+                id="searchInput"
+                placeholder="Search in this view…"
+                autocomplete="off"
+              />
+            </label>
+            <p class="result-meta" id="resultMeta"></p>
+          </div>
+          <div class="month-totals" id="monthTotals" hidden></div>
+          <div class="table-wrap card">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Amount</th>
+                  <th>Description</th>
+                  <th>Bank</th>
+                  <th>Account</th>
+                  <th>Location</th>
+                </tr>
+              </thead>
+              <tbody id="rows">
+                <tr><td colspan="6" class="empty">Starting…</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager" id="pager" hidden>
+            <button type="button" class="btn" id="prevBtn">Previous</button>
+            <button type="button" class="btn" id="nextBtn">Next</button>
+          </div>
+        </div>
       </div>
     </section>
   </main>
   <script>
     document.getElementById("logoutLink").href = (window.__BASE || "") + "/auth/logout";
-    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=9"><\/script>');
+    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=10"><\/script>');
   </script>
 </body>
 </html>

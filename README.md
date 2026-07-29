@@ -77,12 +77,15 @@ Add DNS for `plaid-test` (proxied) or use **Workers → Custom Domains** in the 
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/status` | Linked Items/accounts, sync flags, counts |
+| GET | `/api/status` | Linked Items/accounts, sync flags, date_min/max |
+| GET | `/api/summary?all=1` or `since=&until=` | Institution → account → year → month In/Out/Net |
 | POST | `/api/create_link_token` | Start Link |
 | POST | `/api/exchange_public_token` | **Add** Item + background sync (does not wipe others) |
 | POST | `/api/sync` | Sync all Items |
-| GET | `/api/transactions?q=&since=&limit=&offset=` | Searchable rows |
+| GET | `/api/transactions?since=&until=&all=1&q=&account_id=&offset=` | Date-framed searchable rows |
 | POST | `/api/reset` | Wipe all Items/accounts/transactions |
+
+Date frames: `since` / `until` are inclusive `YYYY-MM-DD`. Pass `all=1` for no date filter. Sync still stores whatever Plaid returns; frames only affect reads/aggregates.
 
 ## Saturday cutover (mini-PC)
 
