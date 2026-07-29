@@ -6,7 +6,7 @@
   <title>Home — Transactions</title>
   <script>
     window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
-    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=10" />');
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=11" />');
   </script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 </head>
@@ -36,6 +36,18 @@
         <div class="main-pane">
           <div class="toolbar">
             <p class="scope" id="scopeLabel">All</p>
+            <div class="range">
+              <label>
+                From
+                <input type="month" id="rangeFrom" />
+              </label>
+              <label>
+                To
+                <input type="month" id="rangeTo" />
+              </label>
+              <button type="button" class="btn" id="rangeApply">Apply range</button>
+              <button type="button" class="btn" id="rangeClear" hidden>Clear range</button>
+            </div>
             <label class="search">
               <span class="sr-only">Search</span>
               <input
@@ -75,7 +87,7 @@
   </main>
   <script>
     document.getElementById("logoutLink").href = (window.__BASE || "") + "/auth/logout";
-    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=10"><\/script>');
+    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=11"><\/script>');
   </script>
 </body>
 </html>

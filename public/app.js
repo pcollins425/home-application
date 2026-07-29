@@ -26,6 +26,10 @@ const monthTotals = document.getElementById("monthTotals");
 const pager = document.getElementById("pager");
 const prevBtn = document.getElementById("prevBtn");
 const nextBtn = document.getElementById("nextBtn");
+const rangeFrom = document.getElementById("rangeFrom");
+const rangeTo = document.getElementById("rangeTo");
+const rangeApply = document.getElementById("rangeApply");
+const rangeClear = document.getElementById("rangeClear");
 
 let cachedLinkToken = null;
 let linkTokenPromise = null;
@@ -35,7 +39,7 @@ let searchQuery = "";
 let offset = 0;
 let searchTimer = null;
 
-/** @type {{ itemId: string|null, accountId: string|null, year: string|null, month: string|null, since: string|null, until: string|null, label: string }} */
+/** @type {any} */
 let selection = {
   itemId: null,
   accountId: null,
@@ -44,6 +48,7 @@ let selection = {
   since: null,
   until: null,
   label: "All transactions",
+  mode: "all", // all | month | range
 };
 
 function setStatus(msg) {
@@ -117,7 +122,6 @@ function monthLabel(ym) {
   return `${name} ${y}`;
 }
 
-/** Inclusive last day of YYYY-MM. */
 function monthUntil(ym) {
   const [y, m] = ym.split("-").map(Number);
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
@@ -126,6 +130,13 @@ function monthUntil(ym) {
 
 function monthSince(ym) {
   return `${ym}-01`;
+}
+
+function ymInRange(ym, fromYm, toYm) {
+  if (!fromYm || !toYm) return false;
+  const a = fromYm <= toYm ? fromYm : toYm;
+  const b = fromYm <= toYm ? toYm : fromYm;
+  return ym >= a && ym <= b;
 }
 
 async function prefetchLinkToken() {
@@ -159,6 +170,15 @@ async function waitForSync(maxMs = 180000) {
   return api("/api/status");
 }
 
+function syncRangeInputsFromSelection() {
+  if (!rangeFrom || !rangeTo || !rangeClear) return;
+  if (selection.since && selection.until) {
+    rangeFrom.value = selection.since.slice(0, 7);
+    rangeTo.value = selection.until.slice(0, 7);
+  }
+  rangeClear.hidden = selection.mode !== "range";
+}
+
 function renderMeta(status) {
   if (!meta) return;
   if (!status.linked) {
@@ -183,7 +203,8 @@ function renderMeta(status) {
       ? `${status.date_min} → ${status.date_max}`
       : "no dates yet";
   meta.innerHTML = `
-    <span>${status.item_count || 0} bank(s) · ${status.account_count || 0} accounts · ${status.transaction_count || 0} tx · ${escapeHtml(range)}</span>
+    <span>${status.item_count || 0} bank(s) · ${status.account_count || 0} accounts · ${status.transaction_count || 0} tx</span>
+    <span>Stored history: <strong>${escapeHtml(range)}</strong> <span class="hint">(what Plaid returned — not a UI cutoff)</span></span>
     ${syncBits}
     ${err ? `<span>Error: <strong>${escapeHtml(err.last_sync_error)}</strong></span>` : ""}
   `;
@@ -193,15 +214,49 @@ function selectionKey(sel) {
   return [sel.itemId, sel.accountId, sel.year, sel.month].map((x) => x || "").join("|");
 }
 
+function accountLabel(inst, acct) {
+  const acctName = [acct.name, acct.mask ? `••${acct.mask}` : null]
+    .filter(Boolean)
+    .join(" ");
+  return `${inst.institution_name || "Bank"} · ${acctName || acct.account_id}`;
+}
+
+/** Sum In/Out/Net for months in [fromYm, toYm] for optional account filter. */
+function totalsForRange(summary, fromYm, toYm, accountId, itemId) {
+  let inflow = 0;
+  let outflow = 0;
+  let tx_count = 0;
+  let pending_count = 0;
+  for (const inst of summary?.institutions || []) {
+    if (itemId && inst.item_id !== itemId) continue;
+    for (const acct of inst.accounts || []) {
+      if (accountId && acct.account_id !== accountId) continue;
+      for (const yr of acct.years || []) {
+        for (const mo of yr.months || []) {
+          if (!ymInRange(mo.month, fromYm, toYm)) continue;
+          inflow += Number(mo.inflow) || 0;
+          outflow += Number(mo.outflow) || 0;
+          tx_count += Number(mo.tx_count) || 0;
+          pending_count += Number(mo.pending_count) || 0;
+        }
+      }
+    }
+  }
+  return { inflow, outflow, net: inflow - outflow, tx_count, pending_count };
+}
+
 function renderTree(summary) {
   if (!treeEl) return;
   const institutions = summary?.institutions || [];
   if (!institutions.length) {
-    treeEl.innerHTML = `<p class="nav-empty">No months yet — sync after linking.</p>`;
+    treeEl.innerHTML = `<p class="nav-empty">No linked accounts yet.</p>`;
     return;
   }
 
   const selKey = selectionKey(selection);
+  const fromYm = selection.since ? selection.since.slice(0, 7) : null;
+  const toYm = selection.until ? selection.until.slice(0, 7) : null;
+
   treeEl.innerHTML = institutions
     .map((inst) => {
       const instName = inst.institution_name || "Institution";
@@ -210,35 +265,47 @@ function renderTree(summary) {
           const acctName = [acct.name, acct.mask ? `••${acct.mask}` : null]
             .filter(Boolean)
             .join(" ");
-          const yearsHtml = (acct.years || [])
-            .map((yr) => {
-              const monthsHtml = (yr.months || [])
-                .map((mo) => {
-                  const key = `${inst.item_id}|${acct.account_id}|${yr.year}|${mo.month}`;
-                  const active = selKey === key ? " active" : "";
-                  return `<button type="button" class="nav-month${active}"
-                    data-item="${escapeHtml(inst.item_id)}"
-                    data-account="${escapeHtml(acct.account_id)}"
-                    data-year="${escapeHtml(yr.year)}"
-                    data-month="${escapeHtml(mo.month)}"
-                    data-in="${mo.inflow}"
-                    data-out="${mo.outflow}"
-                    data-net="${mo.net}"
-                    data-count="${mo.tx_count}"
-                    data-pending="${mo.pending_count}">
-                    <span class="nav-month-name">${escapeHtml(monthLabel(mo.month))}</span>
-                    <span class="nav-month-net">${moneyAbs(mo.net)} net</span>
-                  </button>`;
+          const hasMonths = (acct.years || []).some((y) => (y.months || []).length);
+          const yearsHtml = hasMonths
+            ? (acct.years || [])
+                .map((yr) => {
+                  const monthsHtml = (yr.months || [])
+                    .map((mo) => {
+                      const key = `${inst.item_id}|${acct.account_id}|${yr.year}|${mo.month}`;
+                      const activeMonth = selection.mode === "month" && selKey === key;
+                      const inRange =
+                        selection.mode === "range" &&
+                        (!selection.accountId || selection.accountId === acct.account_id) &&
+                        ymInRange(mo.month, fromYm, toYm);
+                      const active = activeMonth || inRange ? " active" : "";
+                      return `<button type="button" class="nav-month${active}"
+                        data-item="${escapeHtml(inst.item_id)}"
+                        data-account="${escapeHtml(acct.account_id)}"
+                        data-year="${escapeHtml(yr.year)}"
+                        data-month="${escapeHtml(mo.month)}"
+                        data-in="${mo.inflow}"
+                        data-out="${mo.outflow}"
+                        data-net="${mo.net}"
+                        data-count="${mo.tx_count}"
+                        data-pending="${mo.pending_count}">
+                        <span class="nav-month-name">${escapeHtml(monthLabel(mo.month))}</span>
+                        <span class="nav-month-net">${moneyAbs(mo.net)} net</span>
+                      </button>`;
+                    })
+                    .join("");
+                  return `<div class="nav-year">
+                    <p class="nav-year-label">${escapeHtml(yr.year)}</p>
+                    ${monthsHtml}
+                  </div>`;
                 })
-                .join("");
-              return `<div class="nav-year">
-                <p class="nav-year-label">${escapeHtml(yr.year)}</p>
-                ${monthsHtml}
-              </div>`;
-            })
-            .join("");
-          return `<div class="nav-account">
-            <p class="nav-account-label">${escapeHtml(acctName || acct.account_id)}</p>
+                .join("")
+            : `<p class="nav-empty-acct">No transactions in stored history</p>`;
+          const acctActive =
+            selection.accountId === acct.account_id && selection.mode !== "month"
+              ? " active-acct"
+              : "";
+          return `<div class="nav-account${acctActive}">
+            <button type="button" class="nav-account-label" data-item="${escapeHtml(inst.item_id)}" data-account="${escapeHtml(acct.account_id)}">${escapeHtml(acctName || acct.account_id)}</button>
             ${yearsHtml}
           </div>`;
         })
@@ -261,6 +328,7 @@ function renderTree(summary) {
         since: monthSince(month),
         until: monthUntil(month),
         label: `${btn.closest(".nav-inst")?.querySelector(".nav-inst-label")?.textContent || "Bank"} · ${btn.closest(".nav-account")?.querySelector(".nav-account-label")?.textContent || "Account"} · ${monthLabel(month)}`,
+        mode: "month",
         inflow: Number(btn.getAttribute("data-in") || 0),
         outflow: Number(btn.getAttribute("data-out") || 0),
         net: Number(btn.getAttribute("data-net") || 0),
@@ -268,13 +336,40 @@ function renderTree(summary) {
         pending_count: Number(btn.getAttribute("data-pending") || 0),
       };
       offset = 0;
+      syncRangeInputsFromSelection();
+      renderTree(lastSummary);
+      loadTransactions().catch((err) => setStatus(String(err.message || err)));
+    });
+  });
+
+  treeEl.querySelectorAll(".nav-account-label").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const itemId = btn.getAttribute("data-item");
+      const accountId = btn.getAttribute("data-account");
+      const inst = (lastSummary?.institutions || []).find((i) => i.item_id === itemId);
+      const acct = inst?.accounts?.find((a) => a.account_id === accountId);
+      selection = {
+        itemId,
+        accountId,
+        year: null,
+        month: null,
+        since: null,
+        until: null,
+        label: acct && inst ? `${accountLabel(inst, acct)} · all months` : "Account",
+        mode: "all",
+      };
+      offset = 0;
+      if (rangeClear) rangeClear.hidden = true;
       renderTree(lastSummary);
       loadTransactions().catch((err) => setStatus(String(err.message || err)));
     });
   });
 
   if (navAll) {
-    navAll.classList.toggle("active", !selection.month && !selection.accountId);
+    navAll.classList.toggle(
+      "active",
+      selection.mode === "all" && !selection.accountId && !selection.itemId
+    );
   }
 }
 
@@ -288,7 +383,7 @@ function updatePager(total) {
 
 function renderMonthTotals() {
   if (!monthTotals) return;
-  if (!selection.month) {
+  if (selection.mode !== "month" && selection.mode !== "range") {
     monthTotals.hidden = true;
     monthTotals.innerHTML = "";
     return;
@@ -316,6 +411,7 @@ async function loadTransactions() {
 
   if (scopeLabel) scopeLabel.textContent = selection.label;
   renderMonthTotals();
+  syncRangeInputsFromSelection();
 
   const data = await api(`/api/transactions?${params}`);
   const transactions = data.transactions || [];
@@ -325,7 +421,7 @@ async function loadTransactions() {
     const frame =
       data.since || data.until
         ? ` · ${data.since || "…"} → ${data.until || "…"}`
-        : " · all dates";
+        : " · all stored dates";
     resultMeta.textContent = searchQuery
       ? `${total} match${total === 1 ? "" : "es"} for “${searchQuery}”${frame}`
       : `${total} transaction${total === 1 ? "" : "s"}${frame}`;
@@ -338,7 +434,7 @@ async function loadTransactions() {
       rows.innerHTML = `<tr><td colspan="6" class="empty">${
         searchQuery
           ? "No matches in this view."
-          : "No transactions in this view — try Sync now or another month."
+          : "No transactions in this view — try Sync now, another month, or a wider range."
       }</td></tr>`;
     }
     return;
@@ -366,7 +462,6 @@ async function loadTransactions() {
   }
 }
 
-/** Pick most recent month across tree as default selection. */
 function pickDefaultSelection(summary) {
   let best = null;
   for (const inst of summary?.institutions || []) {
@@ -381,7 +476,8 @@ function pickDefaultSelection(summary) {
               month: mo.month,
               since: monthSince(mo.month),
               until: monthUntil(mo.month),
-              label: `${inst.institution_name || "Bank"} · ${[acct.name, acct.mask ? `••${acct.mask}` : null].filter(Boolean).join(" ")} · ${monthLabel(mo.month)}`,
+              label: `${accountLabel(inst, acct)} · ${monthLabel(mo.month)}`,
+              mode: "month",
               inflow: mo.inflow,
               outflow: mo.outflow,
               net: mo.net,
@@ -394,6 +490,49 @@ function pickDefaultSelection(summary) {
     }
   }
   return best;
+}
+
+function applyRangeFromInputs() {
+  const from = rangeFrom?.value;
+  const to = rangeTo?.value;
+  if (!from || !to) {
+    setStatus("Pick both From and To months for a range.");
+    return;
+  }
+  const fromYm = from <= to ? from : to;
+  const toYm = from <= to ? to : from;
+  const totals = totalsForRange(
+    lastSummary,
+    fromYm,
+    toYm,
+    selection.accountId,
+    selection.itemId
+  );
+  const scope =
+    selection.accountId && lastSummary
+      ? (() => {
+          for (const inst of lastSummary.institutions || []) {
+            const acct = (inst.accounts || []).find((a) => a.account_id === selection.accountId);
+            if (acct) return accountLabel(inst, acct);
+          }
+          return "Selected account";
+        })()
+      : "All accounts";
+  selection = {
+    itemId: selection.itemId,
+    accountId: selection.accountId,
+    year: null,
+    month: null,
+    since: monthSince(fromYm),
+    until: monthUntil(toYm),
+    label: `${scope} · ${monthLabel(fromYm)} → ${monthLabel(toYm)}`,
+    mode: "range",
+    ...totals,
+  };
+  offset = 0;
+  if (rangeClear) rangeClear.hidden = false;
+  renderTree(lastSummary);
+  loadTransactions().catch((err) => setStatus(String(err.message || err)));
 }
 
 async function refresh() {
@@ -438,30 +577,38 @@ async function refresh() {
   }
 
   lastSummary = await api("/api/summary?all=1");
-  if (!selection.month) {
+
+  // Bound month inputs to stored history when available
+  if (rangeFrom && rangeTo && lastSummary.date_min && lastSummary.date_max) {
+    const minYm = lastSummary.date_min.slice(0, 7);
+    const maxYm = lastSummary.date_max.slice(0, 7);
+    rangeFrom.min = minYm;
+    rangeFrom.max = maxYm;
+    rangeTo.min = minYm;
+    rangeTo.max = maxYm;
+  }
+
+  if (selection.mode === "all" && !selection.accountId && !selection.month) {
     const def = pickDefaultSelection(lastSummary);
     if (def) selection = def;
-  } else {
-    // Refresh totals for current month from new summary
-    for (const inst of lastSummary.institutions || []) {
-      if (inst.item_id !== selection.itemId) continue;
-      for (const acct of inst.accounts || []) {
-        if (acct.account_id !== selection.accountId) continue;
-        for (const yr of acct.years || []) {
-          for (const mo of yr.months || []) {
-            if (mo.month !== selection.month) continue;
-            selection = {
-              ...selection,
-              inflow: mo.inflow,
-              outflow: mo.outflow,
-              net: mo.net,
-              tx_count: mo.tx_count,
-              pending_count: mo.pending_count,
-            };
-          }
-        }
-      }
-    }
+  } else if (selection.mode === "month" && selection.month) {
+    const t = totalsForRange(
+      lastSummary,
+      selection.month,
+      selection.month,
+      selection.accountId,
+      selection.itemId
+    );
+    selection = { ...selection, ...t };
+  } else if (selection.mode === "range" && selection.since && selection.until) {
+    const t = totalsForRange(
+      lastSummary,
+      selection.since.slice(0, 7),
+      selection.until.slice(0, 7),
+      selection.accountId,
+      selection.itemId
+    );
+    selection = { ...selection, ...t };
   }
 
   renderTree(lastSummary);
@@ -479,8 +626,33 @@ if (navAll) {
       since: null,
       until: null,
       label: "All transactions",
+      mode: "all",
     };
     offset = 0;
+    if (rangeClear) rangeClear.hidden = true;
+    renderTree(lastSummary);
+    loadTransactions().catch((err) => setStatus(String(err.message || err)));
+  });
+}
+
+if (rangeApply) {
+  rangeApply.addEventListener("click", () => applyRangeFromInputs());
+}
+
+if (rangeClear) {
+  rangeClear.addEventListener("click", () => {
+    selection = {
+      itemId: selection.itemId,
+      accountId: selection.accountId,
+      year: null,
+      month: null,
+      since: null,
+      until: null,
+      label: selection.accountId ? "Account · all months" : "All transactions",
+      mode: "all",
+    };
+    offset = 0;
+    rangeClear.hidden = true;
     renderTree(lastSummary);
     loadTransactions().catch((err) => setStatus(String(err.message || err)));
   });
@@ -516,6 +688,7 @@ if (linkBtn) {
             since: null,
             until: null,
             label: "All transactions",
+            mode: "all",
           };
           await waitForSync();
           await refresh();

@@ -575,6 +575,64 @@ async function summary(env: Env, request: Request): Promise<Response> {
   const acctMap = new Map<string, AccountNode>();
   const yearMap = new Map<string, YearNode>();
 
+  // Seed every linked account (even with zero transactions) so the tree
+  // matches /accounts/get, not only accounts that have posted rows.
+  const acctWhere: string[] = ["1=1"];
+  const acctBinds: (string | number)[] = [];
+  if (accountId) {
+    acctWhere.push("a.account_id = ?");
+    acctBinds.push(accountId);
+  }
+  if (itemId) {
+    acctWhere.push("a.item_id = ?");
+    acctBinds.push(itemId);
+  }
+  const acctSql = `SELECT a.account_id, a.item_id, a.name, a.mask, i.institution_name
+     FROM accounts a
+     LEFT JOIN plaid_items i ON i.item_id = a.item_id
+     WHERE ${acctWhere.join(" AND ")}
+     ORDER BY i.institution_name ASC, a.name ASC`;
+  const acctStmt = env.DB.prepare(acctSql);
+  const { results: allAccounts } = acctBinds.length
+    ? await acctStmt.bind(...acctBinds).all<{
+        account_id: string;
+        item_id: string;
+        name: string | null;
+        mask: string | null;
+        institution_name: string | null;
+      }>()
+    : await acctStmt.all<{
+        account_id: string;
+        item_id: string;
+        name: string | null;
+        mask: string | null;
+        institution_name: string | null;
+      }>();
+
+  for (const a of allAccounts || []) {
+    let inst = instMap.get(a.item_id);
+    if (!inst) {
+      inst = {
+        item_id: a.item_id,
+        institution_name: a.institution_name,
+        accounts: [],
+      };
+      instMap.set(a.item_id, inst);
+      institutions.push(inst);
+    }
+    const acctKey = `${a.item_id}:${a.account_id}`;
+    if (!acctMap.has(acctKey)) {
+      const acct: AccountNode = {
+        account_id: a.account_id,
+        name: a.name,
+        mask: a.mask,
+        years: [],
+      };
+      acctMap.set(acctKey, acct);
+      inst.accounts.push(acct);
+    }
+  }
+
   for (const row of results || []) {
     let inst = instMap.get(row.item_id);
     if (!inst) {
@@ -621,9 +679,16 @@ async function summary(env: Env, request: Request): Promise<Response> {
     });
   }
 
+  const range = await env.DB.prepare(
+    "SELECT MIN(date) AS date_min, MAX(date) AS date_max FROM transactions"
+  ).first<{ date_min: string | null; date_max: string | null }>();
+
   return json({
     since,
     until,
+    date_min: range?.date_min ?? null,
+    date_max: range?.date_max ?? null,
+    account_count: acctMap.size,
     institutions,
   });
 }
