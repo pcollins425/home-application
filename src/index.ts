@@ -8,6 +8,7 @@ export interface Env {
   PLAID_COUNTRY_CODES: string;
   PLAID_REDIRECT_URI?: string;
   PLAID_SEND_REDIRECT?: string;
+  PLAID_DAYS_REQUESTED?: string;
   TRANSACTIONS_SINCE: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET?: string;
@@ -74,12 +75,20 @@ async function createLinkToken(env: Env, request: Request): Promise<Response> {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  // History depth is set HERE at Link time (default 90 if omitted). Max 730.
+  // Changing this later does NOT extend existing Items — must re-Link.
+  const daysRequested = Math.min(
+    Math.max(Number(env.PLAID_DAYS_REQUESTED || 730) || 730, 30),
+    730
+  );
+
   const body: Record<string, unknown> = {
     user: { client_user_id: "home-bridge-user-1" },
     client_name: "Home Application",
     products,
     country_codes,
     language: "en",
+    transactions: { days_requested: daysRequested },
   };
 
   // Only send redirect_uri when allowlisted in Plaid dashboard AND enabled.
@@ -101,6 +110,7 @@ async function createLinkToken(env: Env, request: Request): Promise<Response> {
         debug: {
           plaid_env: (env.PLAID_ENV || "").toLowerCase(),
           sent_redirect: Boolean(body.redirect_uri),
+          days_requested: daysRequested,
         },
       },
       502
