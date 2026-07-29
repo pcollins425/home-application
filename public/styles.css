@@ -286,6 +286,62 @@ code { font-family: var(--mono); font-size: 0.85em; }
   color: var(--text);
   font-weight: 560;
 }
+.range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.65rem;
+  align-items: end;
+  flex: 1 1 100%;
+}
+.range label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.range input[type="month"] {
+  border: 1px solid var(--line);
+  background: #0c1015;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.9rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.hint { color: var(--muted); font-size: 0.82rem; }
+.nav-empty-acct {
+  margin: 0.15rem 0 0.35rem 0.35rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-style: italic;
+}
+.nav-account-label {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.3rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-account-label:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 80%, white);
+}
+.nav-account.active-acct > .nav-account-label {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
 .month-totals {
   display: flex;
   flex-wrap: wrap;
