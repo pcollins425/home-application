@@ -2,9 +2,9 @@
 
 Short-lived personal finance bridge: **Cloudflare Worker + D1 + simple transaction dashboard**.
 
-- One bank account (Plaid Development)
+- Multiple bank Links (Plaid Items), soft cap **10 accounts** total
 - History from **2026-05-01** (configurable) through ongoing cron sync
-- UI: date, amount, description, location — enough to compare to the bank app
+- UI: searchable table — date, amount, description, bank, account, location
 - **No tunnel / webhooks** for this bridge (cron every 4 hours)
 - Creds on Cloudflare are **cloud-only** — rotate secret + re-Link on mini-PC cutover; do not copy tokens/secrets to local
 
@@ -73,15 +73,16 @@ Open the Worker URL → unlock with `ACCESS_KEY` → **Link account** → **Sync
 
 Add DNS for `plaid-test` (proxied) or use **Workers → Custom Domains** in the dashboard. `wrangler.toml` already declares route `plaid-test.collinsmediallc.com/*`. Then set `PLAID_REDIRECT_URI` to that origin and register it in Plaid.
 
-## API (all require `Authorization: Bearer <ACCESS_KEY>`)
+## API (session cookie required)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/status` | Linked? last sync? count |
+| GET | `/api/status` | Linked Items/accounts, sync flags, counts |
 | POST | `/api/create_link_token` | Start Link |
-| POST | `/api/exchange_public_token` | Store Item + first sync |
-| POST | `/api/sync` | Manual `/transactions/sync` |
-| GET | `/api/transactions?since=2026-05-01` | Dashboard rows |
+| POST | `/api/exchange_public_token` | **Add** Item + background sync (does not wipe others) |
+| POST | `/api/sync` | Sync all Items |
+| GET | `/api/transactions?q=&since=&limit=&offset=` | Searchable rows |
+| POST | `/api/reset` | Wipe all Items/accounts/transactions |
 
 ## Saturday cutover (mini-PC)
 
@@ -95,3 +96,4 @@ Add DNS for `plaid-test` (proxied) or use **Workers → Custom Domains** in the 
 - Plaid amounts: **positive = money out** (matches Plaid; UI shows spending as negative-looking red).
 - After Link, history can take seconds–minutes; use **Sync now** or wait for cron.
 - USB (`G:`) holds secrets source-of-truth; this repo on `E:` is code only.
+- **Link another bank** adds a connection. Full wipe is `/api/reset` only (not in the UI).

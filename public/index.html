@@ -7,7 +7,7 @@
   <script>
     // Absolute asset URLs under /plaid/* (www) or / (workers.dev)
     window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
-    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=8" />');
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=9" />');
   </script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 </head>
@@ -15,7 +15,7 @@
   <main class="wrap">
     <header class="header">
       <div>
-        <p class="eyebrow">Plaid account</p>
+        <p class="eyebrow">Plaid accounts</p>
         <h1>Transactions</h1>
         <p class="sub" id="statusLine">Starting…</p>
       </div>
@@ -28,6 +28,19 @@
 
     <section id="app">
       <div class="meta" id="meta"></div>
+      <div class="sources" id="sources"></div>
+      <div class="toolbar">
+        <label class="search">
+          <span class="sr-only">Search</span>
+          <input
+            type="search"
+            id="searchInput"
+            placeholder="Search description, account, bank, location…"
+            autocomplete="off"
+          />
+        </label>
+        <p class="result-meta" id="resultMeta"></p>
+      </div>
       <div class="table-wrap card">
         <table>
           <thead>
@@ -35,20 +48,25 @@
               <th>Date</th>
               <th>Amount</th>
               <th>Description</th>
-              <th>Location</th>
+              <th>Bank</th>
               <th>Account</th>
+              <th>Location</th>
             </tr>
           </thead>
           <tbody id="rows">
-            <tr><td colspan="5" class="empty">Starting…</td></tr>
+            <tr><td colspan="6" class="empty">Starting…</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="pager" id="pager" hidden>
+        <button type="button" class="btn" id="prevBtn">Previous</button>
+        <button type="button" class="btn" id="nextBtn">Next</button>
       </div>
     </section>
   </main>
   <script>
     document.getElementById("logoutLink").href = (window.__BASE || "") + "/auth/logout";
-    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=8"><\/script>');
+    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=9"><\/script>');
   </script>
 </body>
 </html>

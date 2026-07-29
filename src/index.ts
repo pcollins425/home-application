@@ -109,6 +109,8 @@ async function createLinkToken(env: Env, request: Request): Promise<Response> {
   return json(data)
 }
 
+const MAX_LINKED_ACCOUNTS = 10;
+
 async function exchangePublicToken(
   env: Env,
   request: Request
@@ -119,6 +121,22 @@ async function exchangePublicToken(
   };
   if (!public_token) {
     return { response: json({ error: "public_token required" }, 400) };
+  }
+
+  const accountCount = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM accounts"
+  ).first<{ n: number }>();
+  if ((accountCount?.n ?? 0) >= MAX_LINKED_ACCOUNTS) {
+    return {
+      response: json(
+        {
+          error: "account_limit",
+          detail: `Already at ${MAX_LINKED_ACCOUNTS} accounts — unlink or clear before adding more.`,
+          account_count: accountCount?.n ?? 0,
+        },
+        400
+      ),
+    };
   }
 
   const res = await plaidFetch(env, "/item/public_token/exchange", {
@@ -139,17 +157,20 @@ async function exchangePublicToken(
   const itemId = data.item_id;
   const accessToken = data.access_token;
 
-  // Store Item immediately; sync in background so the browser isn't stuck behind
-  // a multi-page /transactions/sync (frontend used to abort at 20s).
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM transactions"),
-    env.DB.prepare("DELETE FROM accounts"),
-    env.DB.prepare("DELETE FROM plaid_items"),
-    env.DB.prepare(
-      `INSERT INTO plaid_items (item_id, access_token, institution_name, cursor, linked_at, last_sync_status)
-       VALUES (?, ?, ?, NULL, ?, 'syncing')`
-    ).bind(itemId, accessToken, institution, now),
-  ]);
+  // Add Item (multi-bank). Do not wipe other Items/accounts/transactions.
+  // Sync in background so the browser isn't stuck behind multi-page sync.
+  await env.DB.prepare(
+    `INSERT INTO plaid_items (item_id, access_token, institution_name, cursor, linked_at, last_sync_status)
+     VALUES (?, ?, ?, NULL, ?, 'syncing')
+     ON CONFLICT(item_id) DO UPDATE SET
+       access_token=excluded.access_token,
+       institution_name=COALESCE(excluded.institution_name, plaid_items.institution_name),
+       cursor=NULL,
+       last_sync_status='syncing',
+       last_sync_error=NULL`
+  )
+    .bind(itemId, accessToken, institution, now)
+    .run();
 
   return {
     response: json({
@@ -376,10 +397,11 @@ async function syncAll(env: Env) {
 }
 
 async function status(env: Env): Promise<Response> {
-  const item = await env.DB.prepare(
+  const { results: items } = await env.DB.prepare(
     `SELECT item_id, institution_name, linked_at, last_sync_at, last_sync_status, last_sync_error
-     FROM plaid_items LIMIT 1`
-  ).first<{
+     FROM plaid_items
+     ORDER BY linked_at ASC`
+  ).all<{
     item_id: string;
     institution_name: string | null;
     linked_at: string;
@@ -388,6 +410,14 @@ async function status(env: Env): Promise<Response> {
     last_sync_error: string | null;
   }>();
 
+  const { results: accounts } = await env.DB.prepare(
+    `SELECT a.account_id, a.item_id, a.name, a.official_name, a.mask, a.subtype, a.type,
+            i.institution_name
+     FROM accounts a
+     LEFT JOIN plaid_items i ON i.item_id = a.item_id
+     ORDER BY i.institution_name ASC, a.name ASC`
+  ).all();
+
   const since = env.TRANSACTIONS_SINCE || "2026-05-01";
   const countRow = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM transactions WHERE date >= ?"
@@ -395,9 +425,22 @@ async function status(env: Env): Promise<Response> {
     .bind(since)
     .first<{ n: number }>();
 
+  const itemList = items || [];
+  const accountList = accounts || [];
+  const syncing = itemList.some((i) => i.last_sync_status === "syncing");
+  // Back-compat for older UI: first item
+  const item = itemList[0] || null;
+
   return json({
-    linked: !!item,
+    linked: itemList.length > 0,
     item,
+    items: itemList,
+    accounts: accountList,
+    item_count: itemList.length,
+    account_count: accountList.length,
+    account_limit: MAX_LINKED_ACCOUNTS,
+    can_link_more: accountList.length < MAX_LINKED_ACCOUNTS,
+    syncing,
     transaction_count: countRow?.n ?? 0,
     transactions_since: since,
     plaid_env: env.PLAID_ENV,
@@ -411,10 +454,55 @@ async function listTransactions(
   const url = new URL(request.url);
   const since =
     url.searchParams.get("since") || env.TRANSACTIONS_SINCE || "2026-05-01";
+  const q = (url.searchParams.get("q") || "").trim();
+  const accountId = (url.searchParams.get("account_id") || "").trim();
+  const itemId = (url.searchParams.get("item_id") || "").trim();
   const limit = Math.min(
-    Number(url.searchParams.get("limit") || 500),
+    Math.max(Number(url.searchParams.get("limit") || 500) || 500, 1),
     2000
   );
+  const offset = Math.max(Number(url.searchParams.get("offset") || 0) || 0, 0);
+
+  const where: string[] = ["t.date >= ?"];
+  const binds: (string | number)[] = [since];
+
+  if (accountId) {
+    where.push("t.account_id = ?");
+    binds.push(accountId);
+  }
+  if (itemId) {
+    where.push("t.item_id = ?");
+    binds.push(itemId);
+  }
+  if (q) {
+    where.push(
+      `(
+        COALESCE(t.merchant_name, '') LIKE ? OR
+        COALESCE(t.name, '') LIKE ? OR
+        COALESCE(t.location_city, '') LIKE ? OR
+        COALESCE(t.location_region, '') LIKE ? OR
+        COALESCE(t.category, '') LIKE ? OR
+        COALESCE(a.name, '') LIKE ? OR
+        COALESCE(a.mask, '') LIKE ? OR
+        COALESCE(i.institution_name, '') LIKE ?
+      )`
+    );
+    // Strip LIKE wildcards from user input (personal search — keep it simple).
+    const like = `%${q.replace(/[%_]/g, "")}%`;
+    for (let i = 0; i < 8; i++) binds.push(like);
+  }
+
+  const whereSql = where.join(" AND ");
+
+  const countRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n
+     FROM transactions t
+     LEFT JOIN accounts a ON a.account_id = t.account_id
+     LEFT JOIN plaid_items i ON i.item_id = t.item_id
+     WHERE ${whereSql}`
+  )
+    .bind(...binds)
+    .first<{ n: number }>();
 
   const { results } = await env.DB.prepare(
     `SELECT
@@ -429,18 +517,33 @@ async function listTransactions(
          ELSE NULL
        END AS location,
        t.pending,
+       t.category,
        a.name AS account_name,
-       a.mask AS account_mask
+       a.mask AS account_mask,
+       a.account_id,
+       i.institution_name,
+       i.item_id
      FROM transactions t
      LEFT JOIN accounts a ON a.account_id = t.account_id
-     WHERE t.date >= ?
+     LEFT JOIN plaid_items i ON i.item_id = t.item_id
+     WHERE ${whereSql}
      ORDER BY t.date DESC, t.transaction_id DESC
-     LIMIT ?`
+     LIMIT ? OFFSET ?`
   )
-    .bind(since, limit)
+    .bind(...binds, limit, offset)
     .all();
 
-  return json({ since, count: results?.length ?? 0, transactions: results || [] });
+  return json({
+    since,
+    q: q || null,
+    account_id: accountId || null,
+    item_id: itemId || null,
+    limit,
+    offset,
+    total: countRow?.n ?? 0,
+    count: results?.length ?? 0,
+    transactions: results || [],
+  });
 }
 
 async function handleApi(
@@ -465,18 +568,19 @@ async function handleApi(
     return out.response;
   }
   if (path === "/api/sync" && request.method === "POST") {
-    // Kick sync in background; client polls /api/status until last_sync_status=ok|error
-    const item = await env.DB.prepare(
-      "SELECT item_id FROM plaid_items LIMIT 1"
-    ).first<{ item_id: string }>();
-    if (!item) return json({ error: "not_linked" }, 400);
+    // Kick sync in background; client polls /api/status until syncing=false
+    const { results } = await env.DB.prepare(
+      "SELECT item_id FROM plaid_items"
+    ).all<{ item_id: string }>();
+    if (!results?.length) return json({ error: "not_linked" }, 400);
     await env.DB.prepare(
-      `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL WHERE item_id = ?`
-    )
-      .bind(item.item_id)
-      .run();
+      `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL`
+    ).run();
     ctx.waitUntil(syncAll(env));
-    return json({ ok: true, sync: { started: true, status: "syncing" } });
+    return json({
+      ok: true,
+      sync: { started: true, status: "syncing", items: results.length },
+    });
   }
   if (path === "/api/transactions" && request.method === "GET") {
     return listTransactions(env, request);

@@ -6,14 +6,26 @@ const API_BASE =
       ? "/plaid"
       : "";
 
+const PAGE_SIZE = 500;
+
 const statusLine = document.getElementById("statusLine");
 const meta = document.getElementById("meta");
+const sources = document.getElementById("sources");
 const rows = document.getElementById("rows");
 const linkBtn = document.getElementById("linkBtn");
 const syncBtn = document.getElementById("syncBtn");
+const searchInput = document.getElementById("searchInput");
+const resultMeta = document.getElementById("resultMeta");
+const pager = document.getElementById("pager");
+const prevBtn = document.getElementById("prevBtn");
+const nextBtn = document.getElementById("nextBtn");
 
 let cachedLinkToken = null;
 let linkTokenPromise = null;
+let lastStatus = null;
+let searchQuery = "";
+let offset = 0;
+let searchTimer = null;
 
 function setStatus(msg) {
   if (statusLine) statusLine.textContent = msg;
@@ -80,7 +92,8 @@ async function prefetchLinkToken() {
   linkTokenPromise = api("/api/create_link_token", { method: "POST" })
     .then((data) => {
       cachedLinkToken = data.link_token || null;
-      if (linkBtn) linkBtn.disabled = !cachedLinkToken;
+      const canLink = lastStatus?.can_link_more !== false;
+      if (linkBtn) linkBtn.disabled = !cachedLinkToken || !canLink;
       return cachedLinkToken;
     })
     .catch((err) => {
@@ -92,83 +105,109 @@ async function prefetchLinkToken() {
   return linkTokenPromise;
 }
 
-/** Poll until sync leaves "syncing" (background Worker job). */
-async function waitForSync(maxMs = 120000) {
+/** Poll until no Item is syncing. */
+async function waitForSync(maxMs = 180000) {
   const start = Date.now();
   let delay = 1500;
   while (Date.now() - start < maxMs) {
     const status = await api("/api/status");
-    const st = status.item?.last_sync_status;
-    if (st === "ok" || st === "error" || st === "linked") {
-      return status;
-    }
-    setStatus(
-      `Syncing${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""}… (${status.transaction_count || 0} so far)`
-    );
+    if (!status.syncing) return status;
+    const n = status.account_count || 0;
+    setStatus(`Syncing… (${status.transaction_count || 0} tx · ${n} accounts)`);
     await new Promise((r) => setTimeout(r, delay));
     delay = Math.min(delay + 500, 4000);
   }
   return api("/api/status");
 }
 
-async function refresh() {
-  setStatus("Fetching transactions…");
-  let status = await api("/api/status");
-
-  if (status.item?.last_sync_status === "syncing") {
-    setStatus("Sync still running — waiting…");
-    status = await waitForSync();
-  }
-
-  const syncClass =
-    status.item?.last_sync_status === "ok"
-      ? "ok"
-      : status.item?.last_sync_status === "error"
-        ? "err"
-        : "warn";
-
-  if (linkBtn) {
-    linkBtn.textContent = status.linked ? "Link another / replace" : "Log in to bank";
-  }
-
-  setStatus(
-    status.linked
-      ? `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · ${status.transaction_count} tx since ${status.transactions_since}`
-      : "Not linked — log in to your bank to pull May 2026 → now."
-  );
-
-  if (meta) {
-    meta.innerHTML = status.linked
-      ? `
-      <span>Last sync: <strong>${status.item?.last_sync_at || "—"}</strong>
-        <span class="pill ${syncClass}">${status.item?.last_sync_status || "unknown"}</span>
-      </span>
-      ${status.item?.last_sync_error ? `<span>Error: <strong>${escapeHtml(status.item.last_sync_error)}</strong></span>` : ""}
-    `
-      : `<span>Connect one account. Done.</span>`;
-  }
-
-  if (!status.linked) {
-    if (rows) {
-      rows.innerHTML = `<tr><td colspan="5" class="empty">No account linked yet.</td></tr>`;
-    }
-    prefetchLinkToken();
+function renderSources(status) {
+  if (!sources) return;
+  const accounts = status.accounts || [];
+  if (!accounts.length) {
+    sources.innerHTML = "";
+    sources.hidden = true;
     return;
   }
+  sources.hidden = false;
+  sources.innerHTML = `
+    <p class="sources-label">Linked accounts (${accounts.length}/${status.account_limit || 10})</p>
+    <ul class="sources-list">
+      ${accounts
+        .map((a) => {
+          const label = [a.institution_name, a.name, a.mask ? `••${a.mask}` : null]
+            .filter(Boolean)
+            .join(" · ");
+          return `<li>${escapeHtml(label || a.account_id)}</li>`;
+        })
+        .join("")}
+    </ul>
+  `;
+}
 
-  setStatus(`Loading ${status.transaction_count || ""} transactions…`);
-  const { transactions } = await api(
-    `/api/transactions?since=${encodeURIComponent(status.transactions_since)}`
-  );
+function renderMeta(status) {
+  if (!meta) return;
+  if (!status.linked) {
+    meta.innerHTML = `<span>Link each bank once (up to ${status.account_limit || 10} accounts). Data stays in one table.</span>`;
+    return;
+  }
+  const items = status.items || [];
+  const syncBits = items
+    .map((i) => {
+      const cls =
+        i.last_sync_status === "ok"
+          ? "ok"
+          : i.last_sync_status === "error"
+            ? "err"
+            : "warn";
+      const name = i.institution_name || "Bank";
+      return `<span>${escapeHtml(name)} <span class="pill ${cls}">${escapeHtml(i.last_sync_status || "?")}</span></span>`;
+    })
+    .join("");
+  const err = items.find((i) => i.last_sync_error);
+  meta.innerHTML = `
+    <span>${status.item_count || 0} bank link(s) · ${status.account_count || 0} accounts · ${status.transaction_count || 0} tx since ${status.transactions_since}</span>
+    ${syncBits}
+    ${err ? `<span>Error: <strong>${escapeHtml(err.last_sync_error)}</strong></span>` : ""}
+  `;
+}
+
+function updatePager(total) {
+  if (!pager || !prevBtn || !nextBtn) return;
+  const hasPages = total > PAGE_SIZE;
+  pager.hidden = !hasPages;
+  prevBtn.disabled = offset <= 0;
+  nextBtn.disabled = offset + PAGE_SIZE >= total;
+}
+
+async function loadTransactions(status) {
+  const since = status.transactions_since;
+  const params = new URLSearchParams({
+    since,
+    limit: String(PAGE_SIZE),
+    offset: String(offset),
+  });
+  if (searchQuery) params.set("q", searchQuery);
+
+  const data = await api(`/api/transactions?${params}`);
+  const transactions = data.transactions || [];
+  const total = data.total ?? transactions.length;
+
+  if (resultMeta) {
+    resultMeta.textContent = searchQuery
+      ? `${total} match${total === 1 ? "" : "es"} for “${searchQuery}”`
+      : `${total} transaction${total === 1 ? "" : "s"}`;
+  }
+
+  updatePager(total);
 
   if (!transactions.length) {
     if (rows) {
-      rows.innerHTML = `<tr><td colspan="5" class="empty">No transactions yet — try Sync now.</td></tr>`;
+      rows.innerHTML = `<tr><td colspan="6" class="empty">${
+        searchQuery
+          ? "No matches — try a different search."
+          : "No transactions yet — try Sync now."
+      }</td></tr>`;
     }
-    setStatus(
-      `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · 0 tx since ${status.transactions_since}`
-    );
-    prefetchLinkToken();
     return;
   }
 
@@ -185,16 +224,56 @@ async function refresh() {
         <td>${t.date}${pending}</td>
         <td class="amount ${cls}">${money(amt)}</td>
         <td>${escapeHtml(t.description || "—")}</td>
-        <td>${escapeHtml(t.location || "—")}</td>
+        <td>${escapeHtml(t.institution_name || "—")}</td>
         <td>${escapeHtml(account || "—")}</td>
+        <td>${escapeHtml(t.location || "—")}</td>
       </tr>`;
       })
       .join("");
   }
+}
+
+async function refresh() {
+  setStatus("Fetching…");
+  let status = await api("/api/status");
+  lastStatus = status;
+
+  if (status.syncing) {
+    setStatus("Sync still running — waiting…");
+    status = await waitForSync();
+    lastStatus = status;
+  }
+
+  if (linkBtn) {
+    linkBtn.textContent = status.linked ? "Link another bank" : "Log in to bank";
+    if (!status.can_link_more) {
+      linkBtn.disabled = true;
+      linkBtn.title = `Account limit (${status.account_limit}) reached`;
+    } else {
+      linkBtn.title = "";
+    }
+  }
 
   setStatus(
-    `Linked${status.item?.institution_name ? ` · ${status.item.institution_name}` : ""} · ${transactions.length} tx since ${status.transactions_since}`
+    status.linked
+      ? `${status.account_count} account(s) · ${status.transaction_count} tx since ${status.transactions_since}`
+      : "Not linked — log in to each bank you want to include."
   );
+
+  renderMeta(status);
+  renderSources(status);
+
+  if (!status.linked) {
+    if (rows) {
+      rows.innerHTML = `<tr><td colspan="6" class="empty">No accounts linked yet.</td></tr>`;
+    }
+    if (resultMeta) resultMeta.textContent = "";
+    if (pager) pager.hidden = true;
+    prefetchLinkToken();
+    return;
+  }
+
+  await loadTransactions(status);
   prefetchLinkToken();
 }
 
@@ -219,6 +298,7 @@ if (linkBtn) {
             body: JSON.stringify({ public_token, metadata }),
           });
           setStatus("Connected — syncing in background…");
+          offset = 0;
           await waitForSync();
           await refresh();
         },
@@ -250,10 +330,50 @@ if (syncBtn) {
   });
 }
 
+if (searchInput) {
+  searchInput.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      searchQuery = searchInput.value.trim();
+      offset = 0;
+      if (!lastStatus?.linked) return;
+      try {
+        await loadTransactions(lastStatus);
+      } catch (err) {
+        setStatus(String(err.message || err));
+      }
+    }, 250);
+  });
+}
+
+if (prevBtn) {
+  prevBtn.addEventListener("click", async () => {
+    offset = Math.max(0, offset - PAGE_SIZE);
+    if (!lastStatus?.linked) return;
+    try {
+      await loadTransactions(lastStatus);
+    } catch (err) {
+      setStatus(String(err.message || err));
+    }
+  });
+}
+
+if (nextBtn) {
+  nextBtn.addEventListener("click", async () => {
+    offset += PAGE_SIZE;
+    if (!lastStatus?.linked) return;
+    try {
+      await loadTransactions(lastStatus);
+    } catch (err) {
+      setStatus(String(err.message || err));
+    }
+  });
+}
+
 setStatus("Starting…");
 refresh().catch((err) => {
   setStatus(String(err.message || err));
   if (rows) {
-    rows.innerHTML = `<tr><td colspan="5" class="empty">Could not load: ${escapeHtml(String(err.message || err))}</td></tr>`;
+    rows.innerHTML = `<tr><td colspan="6" class="empty">Could not load: ${escapeHtml(String(err.message || err))}</td></tr>`;
   }
 });
