@@ -19,6 +19,7 @@ const navAll = document.getElementById("navAll");
 const rows = document.getElementById("rows");
 const linkBtn = document.getElementById("linkBtn");
 const syncBtn = document.getElementById("syncBtn");
+const fullSyncBtn = document.getElementById("fullSyncBtn");
 const searchInput = document.getElementById("searchInput");
 const resultMeta = document.getElementById("resultMeta");
 const scopeLabel = document.getElementById("scopeLabel");
@@ -528,21 +529,41 @@ async function applyRangeFromInputs() {
   const wantSince = monthSince(fromYm);
   const wantUntil = monthUntil(toYm);
 
-  // Range can be outside what's already in D1. Sync asks Plaid for updates /
-  // whatever history it still has — it does NOT create a new Item (no extra
-  // free-tier slot). If Plaid never had those months, D1 stays empty for them.
   const storedMin = lastStatus?.date_min || lastSummary?.date_min;
   const storedMax = lastStatus?.date_max || lastSummary?.date_max;
-  const outside =
-    (storedMin && wantSince < storedMin) || (storedMax && wantUntil > storedMax);
-  if (outside && lastStatus?.linked) {
-    setStatus("Range extends past stored history — syncing with Plaid…");
+  const beforeStored = Boolean(storedMin && wantSince < storedMin);
+  const afterStored = Boolean(storedMax && wantUntil > storedMax);
+  const outside = beforeStored || afterStored;
+
+  // Incremental Sync only returns *new* updates after the cursor — it does not
+  // fetch arbitrary older months. If the range is before date_min, try a one-time
+  // full history re-pull (empty cursor). Still limited to what Plaid has.
+  if (beforeStored && lastStatus?.linked) {
+    setStatus(
+      `Range starts before stored history (${storedMin}). Re-pulling full history from Plaid…`
+    );
     try {
-      await api("/api/sync", { method: "POST" });
+      await api("/api/sync", {
+        method: "POST",
+        body: JSON.stringify({ full: true }),
+      });
+      await waitForSync(300000);
+      lastStatus = await api("/api/status");
+      lastSummary = await api("/api/summary?all=1");
+      renderMeta(lastStatus);
+      renderTree(lastSummary);
+    } catch (err) {
+      setStatus(String(err.message || err));
+    }
+  } else if (afterStored && lastStatus?.linked) {
+    setStatus("Range extends past latest stored tx — syncing new updates…");
+    try {
+      await api("/api/sync", { method: "POST", body: JSON.stringify({}) });
       await waitForSync();
       lastStatus = await api("/api/status");
       lastSummary = await api("/api/summary?all=1");
       renderMeta(lastStatus);
+      renderTree(lastSummary);
     } catch (err) {
       setStatus(String(err.message || err));
     }
@@ -581,9 +602,18 @@ async function applyRangeFromInputs() {
   renderTree(lastSummary);
   try {
     await loadTransactions();
-    if ((selection.tx_count || 0) === 0 && outside) {
+    const newMin = lastStatus?.date_min || lastSummary?.date_min;
+    if (beforeStored && newMin && wantSince < newMin) {
       setStatus(
-        "No transactions in that range after sync — Plaid likely has no older history for these Items."
+        `Still no data before ${newMin}. Plaid/your banks only provided history from that date — a wider range cannot invent older months.`
+      );
+    } else if (outside && (selection.tx_count || 0) === 0) {
+      setStatus("No transactions in that range after sync.");
+    } else if (!outside) {
+      setStatus(
+        lastStatus?.linked
+          ? `${lastStatus.account_count} account(s) · ${lastStatus.transaction_count} tx`
+          : "Not linked"
       );
     }
   } catch (err) {
@@ -767,15 +797,45 @@ if (linkBtn) {
 if (syncBtn) {
   syncBtn.addEventListener("click", async () => {
     syncBtn.disabled = true;
+    if (fullSyncBtn) fullSyncBtn.disabled = true;
     setStatus("Starting sync…");
     try {
-      await api("/api/sync", { method: "POST" });
+      await api("/api/sync", { method: "POST", body: JSON.stringify({}) });
       await waitForSync();
       await refresh();
     } catch (err) {
       setStatus(String(err.message || err));
     } finally {
       syncBtn.disabled = false;
+      if (fullSyncBtn) fullSyncBtn.disabled = false;
+    }
+  });
+}
+
+if (fullSyncBtn) {
+  fullSyncBtn.addEventListener("click", async () => {
+    fullSyncBtn.disabled = true;
+    if (syncBtn) syncBtn.disabled = true;
+    setStatus("Full history pull from Plaid (all Items)…");
+    try {
+      const beforeMin = lastStatus?.date_min;
+      await api("/api/sync", {
+        method: "POST",
+        body: JSON.stringify({ full: true }),
+      });
+      await waitForSync(300000);
+      await refresh();
+      const afterMin = lastStatus?.date_min;
+      if (beforeMin && afterMin && afterMin >= beforeMin) {
+        setStatus(
+          `Full pull done. Earliest stored tx still ${afterMin} — Plaid has no older history for these banks.`
+        );
+      }
+    } catch (err) {
+      setStatus(String(err.message || err));
+    } finally {
+      fullSyncBtn.disabled = false;
+      if (syncBtn) syncBtn.disabled = false;
     }
   });
 }

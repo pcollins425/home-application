@@ -502,15 +502,29 @@ async function syncItem(
   }
 }
 
-async function syncAll(env: Env) {
+async function syncAll(env: Env, opts: { full?: boolean } = {}) {
   const { results } = await env.DB.prepare(
     "SELECT item_id, access_token, cursor FROM plaid_items"
   ).all<{ item_id: string; access_token: string; cursor: string | null }>();
 
   const out = [];
   for (const row of results || []) {
+    if (opts.full) {
+      // Empty cursor = Plaid re-sends all history it has for the Item (as adds).
+      // Still cannot invent months the institution never provided.
+      await env.DB.prepare(
+        `UPDATE plaid_items SET cursor = NULL WHERE item_id = ?`
+      )
+        .bind(row.item_id)
+        .run();
+    }
     out.push(
-      await syncItem(env, row.item_id, row.access_token, row.cursor)
+      await syncItem(
+        env,
+        row.item_id,
+        row.access_token,
+        opts.full ? null : row.cursor
+      )
     );
   }
   return out;
@@ -926,6 +940,11 @@ async function handleApi(
     }
     if (path === "/api/sync" && request.method === "POST") {
       // Kick sync in background; client polls /api/status until syncing=false
+      // Body: { full: true } clears cursors and re-pulls all history Plaid has.
+      const body = (await request.json().catch(() => ({}))) as {
+        full?: boolean;
+      };
+      const full = Boolean(body.full);
       const { results } = await env.DB.prepare(
         "SELECT item_id FROM plaid_items"
       ).all<{ item_id: string }>();
@@ -933,10 +952,10 @@ async function handleApi(
       await env.DB.prepare(
         `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL`
       ).run();
-      ctx.waitUntil(syncAll(env));
+      ctx.waitUntil(syncAll(env, { full }));
       return json({
         ok: true,
-        sync: { started: true, status: "syncing", items: results.length },
+        sync: { started: true, status: "syncing", items: results.length, full },
       });
     }
     if (path === "/api/transactions" && request.method === "GET") {
