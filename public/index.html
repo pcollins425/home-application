@@ -6,7 +6,7 @@
   <title>Home — Transactions</title>
   <script>
     window.__BASE = location.pathname.startsWith("/plaid") ? "/plaid" : "";
-    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=12" />');
+    document.write('<link rel="stylesheet" href="' + window.__BASE + '/styles.css?v=13" />');
   </script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 </head>
@@ -87,7 +87,7 @@
   </main>
   <script>
     document.getElementById("logoutLink").href = (window.__BASE || "") + "/auth/logout";
-    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=12"><\/script>');
+    document.write('<script src="' + (window.__BASE || "") + '/app.js?v=13"><\/script>');
   </script>
 </body>
 </html>

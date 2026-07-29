@@ -210,7 +210,7 @@ async function upsertAccounts(
   if (!res.ok || !data.accounts) return;
 
   const now = new Date().toISOString();
-  const stmts = data.accounts.map((a) =>
+  const withBalances = data.accounts.map((a) =>
     env.DB.prepare(
       `INSERT INTO accounts (
          account_id, item_id, name, official_name, mask, subtype, type,
@@ -245,7 +245,104 @@ async function upsertAccounts(
       now
     )
   );
-  if (stmts.length) await runBatch(env, stmts);
+
+  try {
+    if (withBalances.length) await runBatch(env, withBalances);
+  } catch (e) {
+    // Migration 0002 not applied yet — still upsert core account fields.
+    const basic = data.accounts.map((a) =>
+      env.DB.prepare(
+        `INSERT INTO accounts (account_id, item_id, name, official_name, mask, subtype, type)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET
+           name=excluded.name,
+           official_name=excluded.official_name,
+           mask=excluded.mask,
+           subtype=excluded.subtype,
+           type=excluded.type`
+      ).bind(
+        a.account_id,
+        itemId,
+        a.name ?? null,
+        a.official_name ?? null,
+        a.mask ?? null,
+        a.subtype ?? null,
+        a.type ?? null
+      )
+    );
+    if (basic.length) await runBatch(env, basic);
+    console.warn(
+      "upsertAccounts: balance columns missing — apply D1 migration 0002",
+      e instanceof Error ? e.message : e
+    );
+  }
+}
+
+type AccountRow = {
+  account_id: string;
+  item_id: string;
+  name: string | null;
+  official_name?: string | null;
+  mask: string | null;
+  subtype: string | null;
+  type: string | null;
+  balance_available?: number | null;
+  balance_current?: number | null;
+  balance_limit?: number | null;
+  balance_iso_currency?: string | null;
+  balance_updated_at?: string | null;
+  institution_name: string | null;
+};
+
+/** Prefer balance columns; fall back if migration 0002 not applied. */
+async function listAccounts(
+  env: Env,
+  opts: { accountId?: string; itemId?: string } = {}
+): Promise<{ accounts: AccountRow[]; balances_ready: boolean }> {
+  const where: string[] = ["1=1"];
+  const binds: (string | number)[] = [];
+  if (opts.accountId) {
+    where.push("a.account_id = ?");
+    binds.push(opts.accountId);
+  }
+  if (opts.itemId) {
+    where.push("a.item_id = ?");
+    binds.push(opts.itemId);
+  }
+  const whereSql = where.join(" AND ");
+  const order = "ORDER BY i.institution_name ASC, a.name ASC";
+
+  const withBal = `SELECT a.account_id, a.item_id, a.name, a.official_name, a.mask, a.subtype, a.type,
+            a.balance_available, a.balance_current, a.balance_limit, a.balance_iso_currency,
+            a.balance_updated_at, i.institution_name
+     FROM accounts a
+     LEFT JOIN plaid_items i ON i.item_id = a.item_id
+     WHERE ${whereSql}
+     ${order}`;
+  const basic = `SELECT a.account_id, a.item_id, a.name, a.official_name, a.mask, a.subtype, a.type,
+            i.institution_name
+     FROM accounts a
+     LEFT JOIN plaid_items i ON i.item_id = a.item_id
+     WHERE ${whereSql}
+     ${order}`;
+
+  try {
+    const stmt = env.DB.prepare(withBal);
+    const { results } = binds.length
+      ? await stmt.bind(...binds).all<AccountRow>()
+      : await stmt.all<AccountRow>();
+    return { accounts: results || [], balances_ready: true };
+  } catch (e) {
+    console.warn(
+      "listAccounts: balance columns missing — apply D1 migration 0002",
+      e instanceof Error ? e.message : e
+    );
+    const stmt = env.DB.prepare(basic);
+    const { results } = binds.length
+      ? await stmt.bind(...binds).all<AccountRow>()
+      : await stmt.all<AccountRow>();
+    return { accounts: results || [], balances_ready: false };
+  }
 }
 
 async function runBatch(
@@ -486,14 +583,7 @@ async function status(env: Env): Promise<Response> {
     last_sync_error: string | null;
   }>();
 
-  const { results: accounts } = await env.DB.prepare(
-    `SELECT a.account_id, a.item_id, a.name, a.official_name, a.mask, a.subtype, a.type,
-            a.balance_available, a.balance_current, a.balance_limit, a.balance_iso_currency,
-            a.balance_updated_at, i.institution_name
-     FROM accounts a
-     LEFT JOIN plaid_items i ON i.item_id = a.item_id
-     ORDER BY i.institution_name ASC, a.name ASC`
-  ).all();
+  const { accounts: accountList, balances_ready } = await listAccounts(env);
 
   const countRow = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM transactions"
@@ -503,7 +593,6 @@ async function status(env: Env): Promise<Response> {
   ).first<{ date_min: string | null; date_max: string | null }>();
 
   const itemList = items || [];
-  const accountList = accounts || [];
   const syncing = itemList.some((i) => i.last_sync_status === "syncing");
   const item = itemList[0] || null;
 
@@ -517,6 +606,7 @@ async function status(env: Env): Promise<Response> {
     account_limit: MAX_LINKED_ACCOUNTS,
     can_link_more: accountList.length < MAX_LINKED_ACCOUNTS,
     syncing,
+    balances_ready,
     transaction_count: countRow?.n ?? 0,
     date_min: range?.date_min ?? null,
     date_max: range?.date_max ?? null,
@@ -608,53 +698,10 @@ async function summary(env: Env, request: Request): Promise<Response> {
 
   // Seed every linked account (even with zero transactions) so the tree
   // matches /accounts/get, not only accounts that have posted rows.
-  const acctWhere: string[] = ["1=1"];
-  const acctBinds: (string | number)[] = [];
-  if (accountId) {
-    acctWhere.push("a.account_id = ?");
-    acctBinds.push(accountId);
-  }
-  if (itemId) {
-    acctWhere.push("a.item_id = ?");
-    acctBinds.push(itemId);
-  }
-  const acctSql = `SELECT a.account_id, a.item_id, a.name, a.mask, a.subtype, a.type,
-            a.balance_available, a.balance_current, a.balance_limit, a.balance_iso_currency,
-            a.balance_updated_at, i.institution_name
-     FROM accounts a
-     LEFT JOIN plaid_items i ON i.item_id = a.item_id
-     WHERE ${acctWhere.join(" AND ")}
-     ORDER BY i.institution_name ASC, a.name ASC`;
-  const acctStmt = env.DB.prepare(acctSql);
-  const { results: allAccounts } = acctBinds.length
-    ? await acctStmt.bind(...acctBinds).all<{
-        account_id: string;
-        item_id: string;
-        name: string | null;
-        mask: string | null;
-        subtype: string | null;
-        type: string | null;
-        balance_available: number | null;
-        balance_current: number | null;
-        balance_limit: number | null;
-        balance_iso_currency: string | null;
-        balance_updated_at: string | null;
-        institution_name: string | null;
-      }>()
-    : await acctStmt.all<{
-        account_id: string;
-        item_id: string;
-        name: string | null;
-        mask: string | null;
-        subtype: string | null;
-        type: string | null;
-        balance_available: number | null;
-        balance_current: number | null;
-        balance_limit: number | null;
-        balance_iso_currency: string | null;
-        balance_updated_at: string | null;
-        institution_name: string | null;
-      }>();
+  const { accounts: allAccounts, balances_ready } = await listAccounts(env, {
+    accountId: accountId || undefined,
+    itemId: itemId || undefined,
+  });
 
   for (const a of allAccounts || []) {
     let inst = instMap.get(a.item_id);
@@ -675,11 +722,11 @@ async function summary(env: Env, request: Request): Promise<Response> {
         mask: a.mask,
         subtype: a.subtype,
         type: a.type,
-        balance_available: a.balance_available,
-        balance_current: a.balance_current,
-        balance_limit: a.balance_limit,
-        balance_iso_currency: a.balance_iso_currency,
-        balance_updated_at: a.balance_updated_at,
+        balance_available: a.balance_available ?? null,
+        balance_current: a.balance_current ?? null,
+        balance_limit: a.balance_limit ?? null,
+        balance_iso_currency: a.balance_iso_currency ?? null,
+        balance_updated_at: a.balance_updated_at ?? null,
         years: [],
       };
       acctMap.set(acctKey, acct);
@@ -743,6 +790,7 @@ async function summary(env: Env, request: Request): Promise<Response> {
     date_min: range?.date_min ?? null,
     date_max: range?.date_max ?? null,
     account_count: acctMap.size,
+    balances_ready,
     institutions,
   });
 }
@@ -857,52 +905,58 @@ async function handleApi(
   path: string,
   ctx: ExecutionContext
 ): Promise<Response> {
-  if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET) {
-    return json({ error: "plaid_secrets_missing" }, 500);
-  }
+  try {
+    if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET) {
+      return json({ error: "plaid_secrets_missing" }, 500);
+    }
 
-  if (path === "/api/status" && request.method === "GET") {
-    return status(env);
-  }
-  if (path === "/api/summary" && request.method === "GET") {
-    return summary(env, request);
-  }
-  if (path === "/api/create_link_token" && request.method === "POST") {
-    return createLinkToken(env, request);
-  }
-  if (path === "/api/exchange_public_token" && request.method === "POST") {
-    const out = await exchangePublicToken(env, request);
-    if (out.background) ctx.waitUntil(out.background());
-    return out.response;
-  }
-  if (path === "/api/sync" && request.method === "POST") {
-    // Kick sync in background; client polls /api/status until syncing=false
-    const { results } = await env.DB.prepare(
-      "SELECT item_id FROM plaid_items"
-    ).all<{ item_id: string }>();
-    if (!results?.length) return json({ error: "not_linked" }, 400);
-    await env.DB.prepare(
-      `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL`
-    ).run();
-    ctx.waitUntil(syncAll(env));
-    return json({
-      ok: true,
-      sync: { started: true, status: "syncing", items: results.length },
-    });
-  }
-  if (path === "/api/transactions" && request.method === "GET") {
-    return listTransactions(env, request);
-  }
-  if (path === "/api/reset" && request.method === "POST") {
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM transactions"),
-      env.DB.prepare("DELETE FROM accounts"),
-      env.DB.prepare("DELETE FROM plaid_items"),
-    ]);
-    return json({ ok: true, cleared: true });
-  }
+    if (path === "/api/status" && request.method === "GET") {
+      return status(env);
+    }
+    if (path === "/api/summary" && request.method === "GET") {
+      return summary(env, request);
+    }
+    if (path === "/api/create_link_token" && request.method === "POST") {
+      return createLinkToken(env, request);
+    }
+    if (path === "/api/exchange_public_token" && request.method === "POST") {
+      const out = await exchangePublicToken(env, request);
+      if (out.background) ctx.waitUntil(out.background());
+      return out.response;
+    }
+    if (path === "/api/sync" && request.method === "POST") {
+      // Kick sync in background; client polls /api/status until syncing=false
+      const { results } = await env.DB.prepare(
+        "SELECT item_id FROM plaid_items"
+      ).all<{ item_id: string }>();
+      if (!results?.length) return json({ error: "not_linked" }, 400);
+      await env.DB.prepare(
+        `UPDATE plaid_items SET last_sync_status = 'syncing', last_sync_error = NULL`
+      ).run();
+      ctx.waitUntil(syncAll(env));
+      return json({
+        ok: true,
+        sync: { started: true, status: "syncing", items: results.length },
+      });
+    }
+    if (path === "/api/transactions" && request.method === "GET") {
+      return listTransactions(env, request);
+    }
+    if (path === "/api/reset" && request.method === "POST") {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM transactions"),
+        env.DB.prepare("DELETE FROM accounts"),
+        env.DB.prepare("DELETE FROM plaid_items"),
+      ]);
+      return json({ ok: true, cleared: true });
+    }
 
-  return json({ error: "not_found" }, 404);
+    return json({ error: "not_found" }, 404);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("handleApi", path, message);
+    return json({ error: message || "server_error", path }, 500);
+  }
 }
 
 /** Serve under www.collinsmediallc.com/plaid* and also at workers.dev root. */

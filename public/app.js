@@ -87,11 +87,14 @@ async function api(path, options = {}, timeoutMs = 30000) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail =
+      (typeof data.error === "string" && data.error) ||
+      data.error?.message ||
       data.detail?.error_message ||
       data.detail?.error_code ||
       (typeof data.detail === "string" ? data.detail : null) ||
-      data.error ||
-      res.statusText;
+      data.message ||
+      res.statusText ||
+      `HTTP ${res.status}`;
     throw new Error(detail);
   }
   return data;
